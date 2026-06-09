@@ -13,7 +13,7 @@ patterns outside the registry). Everything else is deterministic code.
 
 ## Architecture Overview
 
-```
+```text
 User
  │
  ▼
@@ -40,7 +40,8 @@ on top of them.
 ## Phases
 
 ### Phase 1 — Registry + Execution Engine
-*Foundation. Build and validate this before any LLM work.*
+
+_Foundation. Build and validate this before any LLM work._
 
 - [ ] Define rule schema: each rule has an ID, name, description, tags (domain, data type,
       severity), parameters, and an execution function
@@ -59,7 +60,8 @@ and produces correct, structured results with no LLM involved.
 ---
 
 ### Phase 2 — Deterministic Profiler
-*Produce the structured dataset summary the agent will reason over.*
+
+_Produce the structured dataset summary the agent will reason over._
 
 - [ ] Column-level stats: null rate, uniqueness ratio, data type, min/max, top-N values,
       value distribution sketch
@@ -76,7 +78,8 @@ structured report format from both sources.
 ---
 
 ### Phase 3 — Scoping Agent (Core LLM Flow)
-*Single-agent first, sub-agent split only if it earns its complexity.*
+
+_Single-agent first, sub-agent split only if it earns its complexity._
 
 - [ ] Set up LangGraph as the orchestration layer with provider-agnostic LLM binding
       (swap model via config, not code changes)
@@ -96,7 +99,8 @@ execute directly.
 ---
 
 ### Phase 4 — Creative Mode
-*Novel rule proposals for patterns outside the registry.*
+
+_Novel rule proposals for patterns outside the registry._
 
 - [ ] During scoping, agent identifies dataset characteristics with no matching registry rule
 - [ ] Agent drafts a rule specification: name, description, rationale, suggested parameters,
@@ -117,6 +121,7 @@ A synthetic dataset will be used throughout development to validate each phase i
 and end-to-end. It should be defined once and reused across all phases.
 
 Planned characteristics:
+
 - Realistic e-commerce or transactional structure (orders, customers, products)
 - Mix of clean and intentionally dirty columns to exercise the rule engine
 - Known issues baked in: nulls in non-nullable columns, out-of-range values, duplicates,
@@ -146,16 +151,16 @@ Planned characteristics:
 
 ## Tech Stack (Initial)
 
-| Layer | Choice | Rationale |
-|---|---|---|
-| Language | Python | Ecosystem fit for data tooling |
-| Package manager | uv | Fast, reproducible |
-| Orchestration | LangGraph | Native support for multi-agent + human-in-the-loop |
-| LLM binding | LangChain core | Provider-agnostic interface |
-| Data layer | Polars | Fast, memory-efficient, clean API; consistent interface across CSV and DB connectors |
-| DB connector | ConnectorX or ADBC | Polars-native Postgres ingestion |
-| Rule/contract format | YAML | Human-readable, diffable, versionable |
-| Testing | pytest | Standard |
+| Layer                | Choice             | Rationale                                                                            |
+| -------------------- | ------------------ | ------------------------------------------------------------------------------------ |
+| Language             | Python             | Ecosystem fit for data tooling                                                       |
+| Package manager      | uv                 | Fast, reproducible                                                                   |
+| Orchestration        | LangGraph          | Native support for multi-agent + human-in-the-loop                                   |
+| LLM binding          | LangChain core     | Provider-agnostic interface                                                          |
+| Data layer           | Polars             | Fast, memory-efficient, clean API; consistent interface across CSV and DB connectors |
+| DB connector         | ConnectorX or ADBC | Polars-native Postgres ingestion                                                     |
+| Rule/contract format | YAML               | Human-readable, diffable, versionable                                                |
+| Testing              | pytest             | Standard                                                                             |
 
 ---
 
