@@ -7,6 +7,18 @@ from dq_agent.registry import Registry
 
 
 def run(contract: Contract, df: pl.DataFrame, registry: Registry) -> list[RuleResult]:
+    # an empty dataset cannot vacuously satisfy any rule — fail all of them up front
+    if df.is_empty():
+        return [
+            RuleResult(
+                rule_id=contract_rule.rule_id,
+                passed=False,
+                violation_rate=0.0,
+                error="cannot evaluate: dataset is empty",
+            )
+            for contract_rule in contract.rules
+        ]
+
     results: list[RuleResult] = []
 
     for contract_rule in contract.rules:

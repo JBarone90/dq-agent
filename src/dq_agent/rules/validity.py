@@ -13,9 +13,6 @@ def range_check(
             violation_rate=0.0,
             error="range_check requires at least one of min_val or max_val",
         )
-    total = len(df)
-    if total == 0:
-        return RuleResult(rule_id="range_check", passed=True, violation_rate=0.0)
 
     conditions = []
     if min_val is not None:
@@ -31,33 +28,27 @@ def range_check(
     return RuleResult(
         rule_id="range_check",
         passed=violation_count == 0,
-        violation_rate=violation_count / total,
+        violation_rate=violation_count / len(df),
     )
 
 
 def allowed_values(df: pl.DataFrame, *, column: str, values: list) -> RuleResult:
-    total = len(df)
-    if total == 0:
-        return RuleResult(rule_id="allowed_values", passed=True, violation_rate=0.0)
     violation_count = df.select(
         (~pl.col(column).is_in(values) & pl.col(column).is_not_null()).alias("v")
     )["v"].sum()
     return RuleResult(
         rule_id="allowed_values",
         passed=violation_count == 0,
-        violation_rate=violation_count / total,
+        violation_rate=violation_count / len(df),
     )
 
 
 def regex_match(df: pl.DataFrame, *, column: str, pattern: str) -> RuleResult:
-    total = len(df)
-    if total == 0:
-        return RuleResult(rule_id="regex_match", passed=True, violation_rate=0.0)
     violation_count = df.select(
         (~pl.col(column).str.contains(pattern) & pl.col(column).is_not_null()).alias("v")
     )["v"].sum()
     return RuleResult(
         rule_id="regex_match",
         passed=violation_count == 0,
-        violation_rate=violation_count / total,
+        violation_rate=violation_count / len(df),
     )

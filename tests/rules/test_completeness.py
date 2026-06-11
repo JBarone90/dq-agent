@@ -21,8 +21,8 @@ def test_null_check_passes_within_tolerance(orders_df):
     assert result.passed is True
 
 
-def test_null_check_empty_dataframe():
-    df = pl.DataFrame({"x": pl.Series([], dtype=pl.Int64)})
+def test_null_check_all_nulls():
+    df = pl.DataFrame({"x": pl.Series([None, None], dtype=pl.Int64)})
     result = null_check(df, column="x")
-    assert result.passed is True
-    assert result.violation_rate == 0.0
+    assert result.passed is False
+    assert result.violation_rate == 1.0

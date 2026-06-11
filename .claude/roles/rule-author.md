@@ -27,8 +27,9 @@ def rule_name(df: pl.DataFrame, *, column: str, **kwargs) -> RuleResult:
 - **No LLM calls.** Rules are deterministic code only.
 - **Polars expressions only.** Never iterate over rows. No pandas, no numpy loops.
 - **Never raise.** Catch internal errors and surface them through `RuleResult.error` if needed.
-- **Column existence is the caller's problem.** The engine validates column names before calling;
-  rules can assume the column exists.
+- **Non-empty, valid input is the engine's problem.** The engine rejects empty datasets
+  before any rule runs (vacuous pass is a silent failure mode) and validates column names.
+  Rules can assume at least one row and that the column exists — do not re-check either.
 
 ## RuleResult fields to populate
 

@@ -94,6 +94,21 @@ def test_run_bad_rule_does_not_block_others(orders_df, registry):
     assert results[1].passed is True
 
 
+def test_run_empty_dataset_fails_every_rule(orders_df, registry):
+    # vacuous pass on zero rows is a silent failure mode; the engine refuses up front
+    from tests.test_registry import MINIMAL_PARAMS
+
+    contract = _contract(*[
+        ContractRule(rule_id=rule_id, params=params)
+        for rule_id, params in MINIMAL_PARAMS.items()
+    ])
+    results = run(contract, orders_df.head(0), registry)
+    assert len(results) == len(MINIMAL_PARAMS)
+    for result in results:
+        assert result.passed is False, f"'{result.rule_id}' passed on an empty dataset"
+        assert result.error == "cannot evaluate: dataset is empty"
+
+
 def test_run_empty_contract_returns_empty_list(orders_df, registry):
     contract = _contract()
     results = run(contract, orders_df, registry)

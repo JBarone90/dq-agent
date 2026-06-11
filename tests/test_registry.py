@@ -1,7 +1,6 @@
 import pytest
 
-from dq_agent.registry import Registry
-from dq_agent.registry.loader import RuleDefinition
+from dq_agent.registry import Registry, RuleDefinition
 from tests.conftest import RULES_DIR
 
 EXPECTED_RULE_IDS = {
