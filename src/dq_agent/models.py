@@ -9,7 +9,7 @@ from pydantic import BaseModel
 class RuleResult(BaseModel):
     rule_id: str
     passed: bool
-    metric: float
+    violation_rate: float
     error: str | None = None
 
 

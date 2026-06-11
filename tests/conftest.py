@@ -15,6 +15,8 @@ DATA_DIR = Path(__file__).parent.parent / "data" / "synthetic"
 # status     : 1 invalid    — row 17 ("refunded" not in VALID_STATUSES)
 # created_at : 1 stale      — row 19 (2020-01-15, >365 days old)
 
+TOTAL_ROWS = 20
+
 DUPLICATE_ORDER_IDS = 1
 NULL_CUSTOMER_IDS = 2
 NULL_AMOUNTS = 1

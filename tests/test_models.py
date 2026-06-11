@@ -5,18 +5,18 @@ from dq_agent.models import Contract, ContractRule, RuleResult
 
 
 def test_rule_result_passed():
-    r = RuleResult(rule_id="null_check", passed=True, metric=0.01)
+    r = RuleResult(rule_id="null_check", passed=True, violation_rate=0.01)
     assert r.passed is True
     assert r.error is None
 
 
 def test_rule_result_failed():
-    r = RuleResult(rule_id="null_check", passed=False, metric=0.1)
+    r = RuleResult(rule_id="null_check", passed=False, violation_rate=0.1)
     assert r.passed is False
 
 
 def test_rule_result_with_error():
-    r = RuleResult(rule_id="null_check", passed=False, metric=0.1, error="column missing")
+    r = RuleResult(rule_id="null_check", passed=False, violation_rate=0.1, error="column missing")
     assert r.error == "column missing"
 
 

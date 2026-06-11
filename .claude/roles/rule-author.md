@@ -32,10 +32,10 @@ def rule_name(df: pl.DataFrame, *, column: str, **kwargs) -> RuleResult:
 
 ## RuleResult fields to populate
 
-- `rule_id`: copy from the YAML `id`, passed in as a parameter or hardcoded per function
+- `rule_id`: copy from the YAML `id`, hardcoded per function
 - `passed`: bool — the single verdict
-- `metric`: the measured value (e.g. null rate, duplicate count) — always populate this
-- `threshold`: what was configured (e.g. `max_null_rate`) — always populate this
+- `violation_rate`: fraction of rows that violated the rule (0.0–1.0) — always populate this
+- `error`: populate only when the rule cannot run due to misconfiguration; set `passed=False`
 
 ## YAML definition (one file per rule)
 
