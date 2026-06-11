@@ -61,6 +61,8 @@ class Registry:
         for name, spec in rule.parameters.items():
             if spec.required and name not in params:
                 errors.append(f"rule '{rule_id}': missing required param '{name}'")
+        for name in sorted(set(params) - set(rule.parameters)):
+            errors.append(f"rule '{rule_id}': unknown param '{name}'")
         return errors
 
     @property

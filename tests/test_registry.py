@@ -60,9 +60,39 @@ def test_registry_validate_params_catches_multiple_missing(registry: Registry):
     assert len(missing) == 2
 
 
+def test_registry_validate_params_catches_unknown_param(registry: Registry):
+    # a typo in a param name must fail at validation, not at call time
+    errors = registry.validate_params("null_check", {"colunm": "order_id"})
+    assert any("unknown param 'colunm'" in e for e in errors)
+
+
 def test_registry_validate_params_optional_not_required(registry: Registry):
     errors = registry.validate_params("null_check", {"column": "x", "max_null_rate": 0.05})
     assert errors == []
+
+
+# Minimal valid params per rule, used to smoke-call every registered rule.
+# If a new rule YAML is added without an entry here, the drift test fails loudly.
+MINIMAL_PARAMS = {
+    "null_check": {"column": "order_id"},
+    "unique_check": {"column": "order_id"},
+    "range_check": {"column": "amount", "min_val": 0.0},
+    "allowed_values": {"column": "status", "values": ["shipped"]},
+    "regex_match": {"column": "email", "pattern": ".*"},
+    "freshness": {"column": "created_at", "max_days": 365},
+}
+
+
+def test_every_rule_reports_its_registered_id(registry: Registry, orders_df):
+    assert set(MINIMAL_PARAMS) == set(registry.rule_ids), (
+        "MINIMAL_PARAMS out of sync with registry — add an entry for the new rule"
+    )
+    for rule_id in registry.rule_ids:
+        fn = registry.resolve(rule_id)
+        result = fn(orders_df, **MINIMAL_PARAMS[rule_id])
+        assert result.rule_id == rule_id, (
+            f"function for '{rule_id}' reports rule_id '{result.rule_id}'"
+        )
 
 
 def test_registry_freshness_rule_is_warning(registry: Registry):
