@@ -10,7 +10,7 @@ deterministically — no LLM involved at execution time.
 
 ## How it works
 
-```
+```text
 dataset + business context
          │
          ▼
@@ -33,7 +33,7 @@ rules not yet in the registry). Profiling and rule execution are pure, testable 
 
 ## Project structure
 
-```
+```text
 dq-agent/
 ├── src/dq_agent/
 │   ├── registry/          # Registry loader — reads rule definitions from YAML
@@ -74,12 +74,53 @@ uv run pytest
 
 See [ACTION_PLAN.md](ACTION_PLAN.md) for the full roadmap.
 
-| Phase | Focus | Status |
-|---|---|---|
-| 1 | Rule registry + execution engine | planned |
-| 2 | Deterministic profiler (CSV + Postgres) | planned |
-| 3 | Scoping agent with human approval gate | planned |
-| 4 | Creative mode — novel rule proposals | planned |
+| Phase | Focus                                   | Status  |
+| ----- | --------------------------------------- | ------- |
+| 1     | Rule registry + execution engine        | done    |
+| 2     | Deterministic profiler (CSV + Postgres) | planned |
+| 3     | Scoping agent with human approval gate  | planned |
+| 4     | Creative mode — novel rule proposals    | planned |
+
+---
+
+## Phase 1 internals: rule → result
+
+This diagram shows how a single rule check flows from configuration to output.
+
+```text
+registry/rules/null_check.yaml
+  │  id, parameters, execution.module, execution.function
+  │
+  ▼
+Registry (startup)
+  │  loads every YAML into RuleDefinition via Pydantic
+  │  indexes by rule_id
+  │  caches callables via importlib on first resolve()
+  │
+  ▼
+Contract (approved YAML)             DataFrame (Polars)
+  │  dataset, list of                │  loaded by a connector
+  │  { rule_id, params }             │  (CSV, Postgres, …)
+  │                                  │
+  └──────────────┬───────────────────┘
+                 ▼
+           Engine  run()
+                 │
+                 │  for each ContractRule:
+                 │    1. registry.validate_params()   ← required params present?
+                 │    2. registry.resolve()           ← importlib → callable
+                 │    3. fn(df, **params)             ← pure rule function
+                 │    4. catch any error → RuleResult(error=…)
+                 │
+                 ▼
+         list[RuleResult]
+           rule_id · passed · violation_rate · error?
+```
+
+Key invariants:
+- The engine never imports rule modules directly — all routing goes through the registry.
+- One failing rule does not block the others; errors are captured per-result.
+- No LLM is involved anywhere in this flow. The agent layer (Phase 3) sits above it.
 
 ---
 
