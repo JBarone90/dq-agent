@@ -22,8 +22,9 @@ The project separates the LLM reasoning layer from all data work. The LLM is int
 ```text
 registry/rules/      ← YAML rule definitions (ID, tags, parameters, execution function)
 src/dq_agent/
-  registry/          ← loads and indexes rule YAML at startup
-  engine/            ← runs an approved contract (list of rule IDs + params) against data; no LLM
+  registry.py        ← loads and indexes rule YAML at startup
+  engine.py          ← runs an approved contract (list of rule IDs + params) against data; no LLM
+  rules/             ← rule functions, one module per DQ category
   profiler/          ← produces a structured JSON report (col stats, table stats, semantic hints)
     connectors/      ← adapters that load data into Polars DataFrames (CSV, Postgres)
   agents/            ← LangGraph orchestration (Phase 3+); wraps profiler and registry as tools

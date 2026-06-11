@@ -36,8 +36,10 @@ rules not yet in the registry). Profiling and rule execution are pure, testable 
 ```text
 dq-agent/
 ├── src/dq_agent/
-│   ├── registry/          # Registry loader — reads rule definitions from YAML
-│   ├── engine/            # Execution engine — runs contracts deterministically
+│   ├── registry.py        # Registry loader — reads rule definitions from YAML
+│   ├── engine.py          # Execution engine — runs contracts deterministically
+│   ├── models.py          # RuleResult, Contract — shared Pydantic models
+│   ├── rules/             # Rule functions, one module per DQ category
 │   ├── profiler/          # Dataset profiler + data source connectors
 │   │   └── connectors/    # CSV (dev), Postgres (primary target)
 │   └── agents/            # LangGraph orchestration (Phase 3+)
