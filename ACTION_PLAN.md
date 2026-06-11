@@ -46,7 +46,8 @@ _Foundation. Build and validate this before any LLM work._
 - [ ] Define rule schema: each rule has an ID, name, description, tags (domain, data type,
       severity), parameters, and an execution function
 - [ ] Implement a seed registry (10–15 rules): nullability, uniqueness, range checks,
-      referential integrity, regex pattern matching, freshness, row count thresholds
+      regex pattern matching, freshness, row count thresholds
+      (referential integrity deferred — single-table scope, see Design Decisions)
 - [ ] Build the execution engine: given a dataset and a rule contract (list of rule IDs +
       parameters), run all rules and return a structured result
 - [ ] Define the result schema: rule ID, passed/failed, row-level detail, timestamp
@@ -71,6 +72,9 @@ _Produce the structured dataset summary the agent will reason over._
 - [ ] Profiler must be backend-agnostic: Polars DataFrames as the internal representation;
       data connectors load into Polars before profiling runs
 - [ ] Connectors in scope: local CSV/Parquet (development), Postgres (primary target)
+- [ ] Redacted report variant for LLM consumption: aggregates, types, null rates, and
+      semantic hints only — no raw cell values (top-N examples excluded by default).
+      Required even with an approved cloud tenant; see Design Decisions
 
 **Exit criteria:** profiler runs on a local file and a Postgres table and produces an identical
 structured report format from both sources.
@@ -103,6 +107,15 @@ _Single-agent first, sub-agent split only if it earns its complexity._
       it (issues caught / missed / spurious rules). This is the regression suite for
       prompt, model, and registry changes — human approval validates one session,
       the harness validates the agent
+- [ ] Record approver identity: `approved_by` alongside `approved_at`; design the
+      contract format so a fuller audit trail can be added later without breaking it
+- [ ] Schema drift invalidates the contract: pre-flight check compares contract columns
+      against the live schema; on drift, route the owner back to re-scoping instead of
+      failing rule-by-rule
+- [ ] Human-readable run report: deterministic renderer from `list[RuleResult]` to a
+      summary a non-technical dataset owner can read
+- [ ] Minimal web UI as localhost demo: chat panel + contract review/approval screen.
+      Auth, deployment, and multi-user are explicitly deferred (decide with IT later)
 
 **Exit criteria:** user points at a dataset, describes its business context, receives a proposed
 rule contract, approves it, and a YAML contract file is produced that the Phase 1 engine can
@@ -161,6 +174,50 @@ Planned characteristics:
 
 ---
 
+## Design Decisions (interview, 2026-06-11)
+
+Explicit answers to questions the original plan left open.
+
+**Purpose & audience.** Dual ambition: an internal tool at work (government context) and a
+portfolio/learning project. Reliability and data privacy are first-class concerns, not
+nice-to-haves. The product's primary deliverable is the **approved contract**, not the run:
+users scope and approve a contract through the tool; scheduled pipelines execute it later.
+
+**Privacy (government data).** LLM calls go only through an approved cloud tenant (e.g. a
+compliant Azure OpenAI deployment). As defense in depth, profiler reports sent to the LLM
+must still contain no raw cell values — aggregates, types, null rates, and semantic hints
+only. This is a hard requirement on the Phase 2 report format, not a Phase 3 afterthought.
+
+**Scope.** Single-table contracts for v1. Referential integrity (multi-table) is deferred,
+and the engine keeps its `run(contract, df, registry)` shape until a concrete multi-table
+need arrives. Dataset scale is unknown and varies; work tables live in Postgres. Design the
+profiler for medium scale with sampling hooks; revisit SQL pushdown only if real tables
+demand it.
+
+**Execution & integration.** dq-agent is consumed as a **library** by pipelines: an Airflow
+task imports a connector + the engine, loads the approved contract, and gates on the
+results. Rationale: the engine is already pure functions over in-memory data with
+structured return values — a library call gives the pipeline typed results with no
+subprocess management or output parsing. A CLI can be added later as a thin wrapper over
+the same entry points if operational needs call for it (e.g. running in an image without
+installing dq-agent into the DAG environment).
+
+**Results.** Consumers need a human-readable report (summary for non-technical dataset
+owners) and machine-readable results for pipeline gating. Run history, trends, and alerting
+remain out of scope — downstream pipelines own them.
+
+**Trust & governance.** The registry is curated by a small engineering team via PR review;
+the rule-author role doc is the team-facing standard. Contract approval records the
+approver's identity (`approved_by`), not just the timestamp. A schema change after approval
+invalidates the contract and routes the owner back to re-scoping — drift is a contract
+lifecycle event, not a per-rule runtime error.
+
+**Interface.** v1 is a minimal web UI (chat panel + contract review screen), built as a
+localhost demo first. Authentication, deployment, and multi-user support are deliberately
+deferred until the demo proves the workflow and IT can be involved.
+
+---
+
 ## Tech Stack (Initial)
 
 | Layer                | Choice             | Rationale                                                                            |
@@ -179,6 +236,10 @@ Planned characteristics:
 ## Open Questions
 
 - Which Postgres connector integrates most cleanly with Polars in practice? (ConnectorX vs ADBC)
-- Should the CLI be the only interface for v1, or is a minimal web UI worth scoping early?
-- Multi-tenancy: single user for now; if internal deployment, does the registry need
-  access control per team or dataset?
+- ~~Should the CLI be the only interface for v1, or is a minimal web UI worth scoping early?~~
+  Answered: minimal web UI, localhost demo first (see Design Decisions)
+- ~~Multi-tenancy: single user for now; if internal deployment, does the registry need
+  access control per team or dataset?~~ Answered: deferred until the demo proves the
+  workflow; decide with IT (see Design Decisions)
+- How large are the real Postgres tables at work? Determines whether profiler sampling
+  hooks are sufficient or SQL pushdown becomes necessary
