@@ -66,7 +66,7 @@ specific to one rule's boundary condition, and would be misleading as a shared f
 Each rule must have tests that:
 1. Assert `passed=True` on clean data (via fixture)
 2. Assert `passed=False` on dirty data (via fixture or inline if fixture doesn't cover the case)
-3. Check `metric` is the correct measured value
+3. Check `violation_rate` is the correct measured value
 4. Cover at least one boundary/edge case inline
 
 Tests live in `tests/rules/` mirroring the source structure.
