@@ -1,0 +1,15 @@
+id: freshness
+name: Freshness Check
+description: Fails if any dates in a column are older than max_days from today.
+tags: [freshness]
+severity: warning
+parameters:
+  column:
+    type: str
+    required: true
+  max_days:
+    type: int
+    required: true
+execution:
+  module: dq_agent.rules.freshness
+  function: freshness

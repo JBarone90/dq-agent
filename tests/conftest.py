@@ -3,7 +3,10 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from dq_agent.registry import Registry
+
 DATA_DIR = Path(__file__).parent.parent / "data" / "synthetic"
+RULES_DIR = Path(__file__).parent.parent / "registry" / "rules"
 
 # Known issues baked into orders.csv — tests assert against these exact counts.
 #
@@ -38,3 +41,8 @@ def synthetic_data_path() -> Path:
 @pytest.fixture(scope="session")
 def orders_df() -> pl.DataFrame:
     return pl.read_csv(DATA_DIR / "orders.csv", try_parse_dates=True)
+
+
+@pytest.fixture(scope="session")
+def registry() -> Registry:
+    return Registry(RULES_DIR)

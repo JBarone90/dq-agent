@@ -1,0 +1,15 @@
+id: regex_match
+name: Regex Match
+description: Fails if any non-null values do not match the regex pattern.
+tags: [validity]
+severity: error
+parameters:
+  column:
+    type: str
+    required: true
+  pattern:
+    type: str
+    required: true
+execution:
+  module: dq_agent.rules.validity
+  function: regex_match

@@ -1,0 +1,15 @@
+id: allowed_values
+name: Allowed Values
+description: Fails if any non-null values are not in the allowed list.
+tags: [validity]
+severity: error
+parameters:
+  column:
+    type: str
+    required: true
+  values:
+    type: list
+    required: true
+execution:
+  module: dq_agent.rules.validity
+  function: allowed_values

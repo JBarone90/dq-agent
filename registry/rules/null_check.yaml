@@ -1,0 +1,16 @@
+id: null_check
+name: Null Check
+description: Fails if the null rate in a column exceeds max_null_rate.
+tags: [completeness]
+severity: error
+parameters:
+  column:
+    type: str
+    required: true
+  max_null_rate:
+    type: float
+    required: false
+    default: 0.0
+execution:
+  module: dq_agent.rules.completeness
+  function: null_check

@@ -1,0 +1,20 @@
+id: range_check
+name: Range Check
+description: Fails if any non-null values fall outside [min_val, max_val]. At least one bound is required.
+tags: [validity]
+severity: error
+parameters:
+  column:
+    type: str
+    required: true
+  min_val:
+    type: float
+    required: false
+    default: null
+  max_val:
+    type: float
+    required: false
+    default: null
+execution:
+  module: dq_agent.rules.validity
+  function: range_check

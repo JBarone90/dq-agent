@@ -1,0 +1,12 @@
+id: unique_check
+name: Unique Check
+description: Fails if any non-null values in a column are duplicated.
+tags: [uniqueness]
+severity: error
+parameters:
+  column:
+    type: str
+    required: true
+execution:
+  module: dq_agent.rules.uniqueness
+  function: unique_check
