@@ -91,6 +91,18 @@ _Single-agent first, sub-agent split only if it earns its complexity._
 - [ ] Human approval gate: present proposed contract, user can accept, reject individual
       rules, or override parameters before finalizing
 - [ ] Persist approved contract as a canonical YAML artifact independent of the agent
+- [ ] Enforce approval in the engine (deferred from Phase 1): `run()` refuses contracts
+      without `approved_at` set — the gate invariant must live in code, not docs
+- [ ] Severity model (design agreed, deferred from Phase 1): registry YAML provides the
+      default severity per rule; the contract can override it per dataset (severity is a
+      property of the rule *in context*, not of the rule itself); the engine stamps the
+      effective severity into each `RuleResult` so downstream consumers can act on a
+      result alone — fail on `error`, log on `warning` — without re-joining the registry
+- [ ] Evaluation harness for the scoping agent: hand-write an "ideal contract" for each
+      synthetic dataset with documented issues, then score the agent's proposal against
+      it (issues caught / missed / spurious rules). This is the regression suite for
+      prompt, model, and registry changes — human approval validates one session,
+      the harness validates the agent
 
 **Exit criteria:** user points at a dataset, describes its business context, receives a proposed
 rule contract, approves it, and a YAML contract file is produced that the Phase 1 engine can
