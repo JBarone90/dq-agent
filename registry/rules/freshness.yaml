@@ -10,6 +10,10 @@ parameters:
   max_days:
     type: int
     required: true
+  as_of:
+    type: date
+    required: false
+    default: null
 execution:
   module: dq_agent.rules.freshness
   function: freshness
