@@ -37,3 +37,33 @@ def test_contract_parses():
 def test_contract_rejects_missing_dataset():
     with pytest.raises(ValidationError):
         Contract(rules=[])
+
+
+def test_contract_approval_fields_default_to_none():
+    c = Contract(dataset="orders", rules=[])
+    assert c.approved_by is None
+    assert c.columns is None
+
+
+def test_contract_yaml_round_trip():
+    c = Contract(
+        dataset="orders",
+        approved_at="2026-06-12T00:00:00Z",
+        approved_by="jacopo",
+        columns={"order_id": "Int64", "amount": "Float64"},
+        rules=[
+            ContractRule(
+                rule_id="null_check",
+                params={"column": "customer_id", "max_null_rate": 0.0},
+                severity="warning",
+            )
+        ],
+    )
+    assert Contract.from_yaml(c.to_yaml()) == c
+
+
+def test_contract_yaml_omits_unset_optionals():
+    c = Contract(dataset="orders", rules=[ContractRule(rule_id="null_check", params={})])
+    text = c.to_yaml()
+    assert "approved_at" not in text
+    assert "severity" not in text

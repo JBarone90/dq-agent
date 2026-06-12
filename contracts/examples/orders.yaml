@@ -6,6 +6,16 @@
 # freshness pins as_of so the contract evaluates identically on any day.
 dataset: orders
 approved_at: 2026-06-12T00:00:00Z
+approved_by: jacopo
+# schema snapshot at approval time — the engine refuses to run if the live schema drifts
+columns:
+  order_id: Int64
+  customer_id: String
+  email: String
+  amount: Float64
+  status: String
+  created_at: Date
+  phone: String
 rules:
   - rule_id: min_row_count
     params: {min_rows: 10}

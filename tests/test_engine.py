@@ -1,10 +1,11 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 import polars as pl
 import pytest
 import yaml
 
-from dq_agent.engine import run
+from dq_agent.engine import ContractNotApprovedError, SchemaDriftError, run
 from dq_agent.models import Contract, ContractRule
 from dq_agent.registry import Registry
 from tests.conftest import (
@@ -15,9 +16,13 @@ from tests.conftest import (
     VALID_STATUSES,
 )
 
+APPROVED_AT = datetime(2026, 6, 12, tzinfo=timezone.utc)
 
-def _contract(*rules: ContractRule) -> Contract:
-    return Contract(dataset="orders", rules=list(rules))
+
+def _contract(*rules: ContractRule, **overrides) -> Contract:
+    return Contract(
+        dataset="orders", approved_at=APPROVED_AT, rules=list(rules), **overrides
+    )
 
 
 def test_run_returns_one_result_per_rule(orders_df, registry):
@@ -145,3 +150,67 @@ def test_run_passes_on_clean_column(orders_df, registry):
     result = run(contract, orders_df, registry)[0]
     assert result.passed is True
     assert result.violation_rate == 0.0
+
+
+def test_run_refuses_unapproved_contract(orders_df, registry):
+    contract = Contract(
+        dataset="orders",
+        rules=[ContractRule(rule_id="null_check", params={"column": "order_id"})],
+    )
+    with pytest.raises(ContractNotApprovedError):
+        run(contract, orders_df, registry)
+
+
+def test_run_stamps_registry_default_severity(orders_df, registry):
+    contract = _contract(
+        ContractRule(rule_id="null_check", params={"column": "order_id"}),
+    )
+    result = run(contract, orders_df, registry)[0]
+    assert result.severity == registry.get("null_check").severity
+
+
+def test_run_contract_severity_overrides_registry_default(orders_df, registry):
+    contract = _contract(
+        ContractRule(rule_id="null_check", params={"column": "order_id"}, severity="warning"),
+    )
+    result = run(contract, orders_df, registry)[0]
+    assert result.severity == "warning"
+
+
+def test_run_stamps_severity_on_unevaluated_results(orders_df, registry):
+    # param errors and empty datasets still produce results consumers gate on —
+    # the effective severity must be present there too
+    contract = _contract(
+        ContractRule(rule_id="null_check", params={}),  # missing required param
+    )
+    assert run(contract, orders_df, registry)[0].severity == "error"
+    contract = _contract(
+        ContractRule(rule_id="null_check", params={"column": "order_id"}, severity="warning"),
+    )
+    assert run(contract, orders_df.head(0), registry)[0].severity == "warning"
+
+
+def test_run_detects_schema_drift(orders_df, registry):
+    columns = {name: str(dtype) for name, dtype in orders_df.schema.items()}
+    columns["amount"] = "Int64"           # retyped in contract vs live Float64
+    columns["legacy_flag"] = "String"     # in contract, missing live
+    del columns["phone"]                  # live column the contract never saw
+    contract = _contract(
+        ContractRule(rule_id="null_check", params={"column": "order_id"}),
+        columns=columns,
+    )
+    with pytest.raises(SchemaDriftError) as excinfo:
+        run(contract, orders_df, registry)
+    message = str(excinfo.value)
+    assert "'amount' changed type" in message
+    assert "'legacy_flag' removed" in message
+    assert "'phone' added" in message
+
+
+def test_run_matching_schema_passes_drift_check(orders_df, registry):
+    contract = _contract(
+        ContractRule(rule_id="null_check", params={"column": "order_id"}),
+        columns={name: str(dtype) for name, dtype in orders_df.schema.items()},
+    )
+    results = run(contract, orders_df, registry)
+    assert results[0].error is None
