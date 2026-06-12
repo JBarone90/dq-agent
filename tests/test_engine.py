@@ -70,6 +70,7 @@ def test_run_missing_required_param_returns_error_result(orders_df, registry):
     result = run(contract, orders_df, registry)[0]
     assert result.passed is False
     assert result.error is not None
+    assert result.violation_rate is None
     assert "column" in result.error
 
 
@@ -107,6 +108,7 @@ def test_run_empty_dataset_fails_every_rule(orders_df, registry):
     for result in results:
         assert result.passed is False, f"'{result.rule_id}' passed on an empty dataset"
         assert result.error == "cannot evaluate: dataset is empty"
+        assert result.violation_rate is None, "unevaluated rule must not report a measured rate"
 
 
 def test_run_empty_contract_returns_empty_list(orders_df, registry):
