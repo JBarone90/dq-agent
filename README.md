@@ -42,7 +42,7 @@ dq-agent/
 │   ├── rules/             # Rule functions, one module per DQ category
 │   ├── profiler.py        # Dataset profiler — stats, semantic hints, redacted reports
 │   ├── connectors.py      # Load CSV/Parquet (dev), Postgres (primary target) into Polars
-│   └── agents/            # LangGraph orchestration (Phase 3+)
+│   └── agents/            # LangGraph scoping agent + human approval gate (Phase 3)
 ├── registry/
 │   └── rules/             # Rule definitions as YAML — the core differentiator
 ├── contracts/
@@ -135,7 +135,6 @@ it (`contracts/examples/orders.yaml`).
 
 ```python
 from pathlib import Path
-import yaml
 
 from dq_agent.connectors import load_csv
 from dq_agent.engine import run
@@ -165,13 +164,11 @@ column profiles as:
 }
 ```
 
-Scoping (Phase 3) turns that report plus your business context into a proposed
-contract; today the contract is hand-written. Run time is three lines:
+The scoping agent (see below) turns that report plus your business context into a
+proposed contract; contracts can also be hand-written. Run time is three lines:
 
 ```python
-contract = Contract.model_validate(
-    yaml.safe_load(Path("contracts/examples/orders.yaml").read_text())
-)
+contract = Contract.from_yaml(Path("contracts/examples/orders.yaml"))
 results = run(contract, df, Registry(Path("registry/rules")))
 ```
 
@@ -188,7 +185,80 @@ freshness       FAIL  0.05    # one order from 2020
 ```
 
 A pipeline gates on these results directly — e.g. fail the Airflow task when any
-rule with severity `error` has `passed == False`.
+rule with severity `error` has `passed == False`. Each result carries its effective
+severity (the contract's per-rule override, else the registry default), so the gate
+needs nothing but the results.
+
+---
+
+## The scoping agent
+
+Phase 3 wraps the scoping workflow in a single LangGraph agent
+(`src/dq_agent/agents/scoping.py`). It converses with the dataset owner, profiles the
+dataset (`profile_dataset` — redacted report only, no raw cell values ever reach the
+LLM), browses the registry (`list_rules`), and proposes a draft contract
+(`propose_contract`, validated against the registry). Approval is a LangGraph
+`interrupt()`: the graph pauses, a human accepts / edits / responds, and only an
+accepted contract is stamped (`approved_at`, `approved_by`), given a schema snapshot,
+and persisted to `contracts/<dataset>.yaml` — directly executable by the engine.
+
+The engine enforces the gate at run time: it raises `ContractNotApprovedError` for
+unapproved contracts and `SchemaDriftError` when the live schema no longer matches
+the snapshot the contract was scoped against (drift routes the owner back to
+re-scoping; it is a contract lifecycle event, not a per-rule failure).
+
+### Running the chat interface
+
+The chat UI is [agent-chat-ui](https://github.com/langchain-ai/agent-chat-ui) —
+LangChain's off-the-shelf client for LangGraph servers. Three steps:
+
+**1. Configure the model.** The dev default is Gemini 2.5 Flash on Google's free tier:
+
+```bash
+uv sync --extra agents
+cp .env.example .env       # then put your GOOGLE_API_KEY in .env
+```
+
+Get a free key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
+The provider is a config value, not a dependency: set `DQ_AGENT_MODEL` to any
+`provider:model` LangChain knows (e.g. `anthropic:claude-sonnet-4-6`, or
+`ollama:qwen3:8b` for fully local) and install the matching `langchain-*` package —
+no code changes.
+
+**2. Serve the graph.** From the repo root:
+
+```bash
+uv run langgraph dev       # serves the 'scoping' graph at http://localhost:2024
+```
+
+**3. Connect a chat client.** Quickest is the hosted client — open
+[agentchat.vercel.app](https://agentchat.vercel.app) and fill in:
+
+- Deployment URL: `http://localhost:2024`
+- Assistant / Graph ID: `scoping`
+- LangSmith API key: leave empty (not needed for a local server)
+
+Or run the UI locally instead:
+
+```bash
+git clone https://github.com/langchain-ai/agent-chat-ui.git
+cd agent-chat-ui
+pnpm install && pnpm dev   # then open http://localhost:3000 and enter the same values
+```
+
+Then chat: point the agent at `data/synthetic/orders.csv`, describe the business
+context, and iterate on its proposal. When you confirm, the approval gate renders
+as an interrupt card (accept / edit / respond); accepting writes the approved
+contract to `contracts/<dataset>.yaml`.
+
+> **Free-tier rate limits:** a single scoping turn makes several model requests
+> (the agent loop calls the model once per tool round), so Gemini's free-tier
+> requests-per-minute cap is easy to hit mid-conversation. If you see 429s, wait
+> a minute and continue — the thread keeps its state — or switch `DQ_AGENT_MODEL`
+> to a model with a higher free RPM (e.g. `google_genai:gemini-2.5-flash-lite`).
+
+The approval interrupt follows the agent-inbox `HumanInterrupt` schema, so
+agent-chat-ui renders the contract review (accept / edit / respond) natively.
 
 ---
 
@@ -259,7 +329,7 @@ See [ACTION_PLAN.md](ACTION_PLAN.md) for the full roadmap.
 | ----- | --------------------------------------- | ------- |
 | 1     | Rule registry + execution engine        | done    |
 | 2     | Deterministic profiler (CSV + Postgres) | done    |
-| 3     | Scoping agent with human approval gate  | planned |
+| 3     | Scoping agent with human approval gate  | in progress |
 | 4     | Creative mode — novel rule proposals    | planned |
 
 ---

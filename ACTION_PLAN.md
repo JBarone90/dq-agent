@@ -85,19 +85,25 @@ structured report format from both sources.
 
 _Single-agent first, sub-agent split only if it earns its complexity._
 
-- [ ] Set up LangGraph as the orchestration layer with provider-agnostic LLM binding
-      (swap model via config, not code changes)
-- [ ] `ProfilerAgent`: wraps Phase 2 profiler as a tool callable by the orchestrator
-- [ ] `ContractAgent`: takes profiler report + user context, queries registry by tags,
-      proposes a parameterized rule suite with reasoning
-- [ ] `OrchestratorAgent`: drives the scoping conversation, asks clarifying questions,
-      routes between sub-agents, maintains session state
-- [ ] Human approval gate: present proposed contract, user can accept, reject individual
-      rules, or override parameters before finalizing
-- [ ] Persist approved contract as a canonical YAML artifact independent of the agent
-- [ ] Enforce approval in the engine (deferred from Phase 1): `run()` refuses contracts
-      without `approved_at` set — the gate invariant must live in code, not docs
-- [ ] Severity model (design agreed, deferred from Phase 1): registry YAML provides the
+- [x] Set up LangGraph as the orchestration layer with provider-agnostic LLM binding
+      (swap model via config, not code changes) — `init_chat_model` driven by
+      `DQ_AGENT_MODEL`; graph in `src/dq_agent/agents/scoping.py`
+- [x] `ProfilerAgent`: wraps Phase 2 profiler as a tool callable by the orchestrator
+      — implemented as the `profile_dataset` tool (single-agent, per the phase intro)
+- [x] `ContractAgent`: takes profiler report + user context, queries registry by tags,
+      proposes a parameterized rule suite with reasoning — implemented as the
+      `list_rules` + `propose_contract` tools, validated against the registry
+- [x] `OrchestratorAgent`: drives the scoping conversation, asks clarifying questions,
+      routes between sub-agents, maintains session state — the single scoping agent
+      covers this; promote to sub-agents only if complexity demands it
+- [x] Human approval gate: present proposed contract, user can accept, reject individual
+      rules, or override parameters before finalizing — LangGraph `interrupt()` in the
+      `approval` node, agent-inbox `HumanInterrupt` schema (accept / edit / respond)
+- [x] Persist approved contract as a canonical YAML artifact independent of the agent
+      — approval stamps `approved_at`/`approved_by` and writes `contracts/<dataset>.yaml`
+- [x] Enforce approval in the engine (deferred from Phase 1): `run()` refuses contracts
+      without `approved_at` set — raises `ContractNotApprovedError`
+- [x] Severity model (design agreed, deferred from Phase 1): registry YAML provides the
       default severity per rule; the contract can override it per dataset (severity is a
       property of the rule *in context*, not of the rule itself); the engine stamps the
       effective severity into each `RuleResult` so downstream consumers can act on a
@@ -107,14 +113,20 @@ _Single-agent first, sub-agent split only if it earns its complexity._
       it (issues caught / missed / spurious rules). This is the regression suite for
       prompt, model, and registry changes — human approval validates one session,
       the harness validates the agent
-- [ ] Record approver identity: `approved_by` alongside `approved_at`; design the
+- [x] Record approver identity: `approved_by` alongside `approved_at`; design the
       contract format so a fuller audit trail can be added later without breaking it
-- [ ] Schema drift invalidates the contract: pre-flight check compares contract columns
+- [x] Schema drift invalidates the contract: pre-flight check compares contract columns
       against the live schema; on drift, route the owner back to re-scoping instead of
-      failing rule-by-rule
+      failing rule-by-rule — the contract snapshots `columns` (name → dtype) at
+      proposal time; `run()` raises `SchemaDriftError` naming what drifted
 - [ ] Human-readable run report: deterministic renderer from `list[RuleResult]` to a
       summary a non-technical dataset owner can read
-- [ ] Minimal web UI as localhost demo: chat panel + contract review/approval screen.
+- [ ] Minimal web UI as localhost demo: use [agent-chat-ui](https://github.com/langchain-ai/agent-chat-ui)
+      instead of building a custom front end. It is LangChain's off-the-shelf chat client for
+      LangGraph servers: serve the scoping graph with `langgraph dev`, point agent-chat-ui at
+      it, and the chat panel comes for free. The approval gate maps to a LangGraph
+      `interrupt()` — agent-chat-ui renders human-in-the-loop interrupts (accept / edit /
+      respond) natively, so the contract review screen is the interrupt payload, not custom UI.
       Auth, deployment, and multi-user are explicitly deferred (decide with IT later)
 
 **Exit criteria:** user points at a dataset, describes its business context, receives a proposed
@@ -216,6 +228,14 @@ lifecycle event, not a per-rule runtime error.
 localhost demo first. Authentication, deployment, and multi-user support are deliberately
 deferred until the demo proves the workflow and IT can be involved.
 
+**Interface implementation (2026-06-12).** The demo UI is agent-chat-ui rather than a
+custom build. Consequences for Phase 3 design: the scoping agent must be exposed as a
+LangGraph Server graph (`langgraph.json` + `langgraph dev`), and the human approval gate
+must be implemented as a LangGraph `interrupt()` whose payload follows the agent-inbox
+`HumanInterrupt` schema, so agent-chat-ui can render accept/edit/respond controls without
+custom front-end work. If the demo later needs a bespoke contract-review screen, that is
+an additive replacement — the graph and interrupt contract stay the same.
+
 ---
 
 ## Tech Stack (Initial)
@@ -226,9 +246,11 @@ deferred until the demo proves the workflow and IT can be involved.
 | Package manager      | uv                 | Fast, reproducible                                                                   |
 | Orchestration        | LangGraph          | Native support for multi-agent + human-in-the-loop                                   |
 | LLM binding          | LangChain core     | Provider-agnostic interface                                                          |
+| Dev/demo LLM         | Gemini 2.5 Flash   | Free tier, solid tool calling; swap via `DQ_AGENT_MODEL` (Ollama for fully local)    |
 | Data layer           | Polars             | Fast, memory-efficient, clean API; consistent interface across CSV and DB connectors |
 | DB connector         | ConnectorX or ADBC | Polars-native Postgres ingestion                                                     |
 | Rule/contract format | YAML               | Human-readable, diffable, versionable                                                |
+| Chat UI (demo)       | agent-chat-ui      | Off-the-shelf chat client for LangGraph servers; renders approval interrupts natively |
 | Testing              | pytest             | Standard                                                                             |
 
 ---

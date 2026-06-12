@@ -13,6 +13,8 @@ uv sync --extra agents       # add LangGraph + LangChain
 uv run pytest                # run all tests
 uv run pytest tests/path/to/test_file.py::test_name   # run a single test
 uv run pytest --cov=src/dq_agent                      # run with coverage
+
+uv run langgraph dev         # serve the scoping graph (langgraph.json) for agent-chat-ui
 ```
 
 ## Architecture
@@ -28,7 +30,8 @@ src/dq_agent/
   profiler.py        ← produces a structured JSON report (col stats, table stats, semantic hints);
                        redact() strips raw cell values before any report reaches an LLM
   connectors.py      ← adapters that load data into Polars DataFrames (CSV/Parquet, Postgres)
-  agents/            ← LangGraph orchestration (Phase 3+); wraps profiler and registry as tools
+  agents/            ← LangGraph scoping agent; wraps profiler and registry as tools, human
+                       approval gate as an interrupt(), persists approved contract YAML
 contracts/examples/  ← approved contract YAML artifacts; output of the human approval gate
 proposals/           ← creative mode outputs — rule specs awaiting developer review, never executed
 data/synthetic/      ← dirty-by-design test dataset (committed); all other data excluded by .gitignore
