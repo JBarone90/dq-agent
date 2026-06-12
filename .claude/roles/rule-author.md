@@ -19,6 +19,8 @@ def rule_name(df: pl.DataFrame, *, column: str, **kwargs) -> RuleResult:
 
 - All parameters after `df` are keyword-only
 - Parameter names must match the `parameters` keys in the rule's YAML definition exactly
+- Table-level rules (e.g. `min_row_count`) take no `column` parameter — the signature
+  above shows the common column-level shape, not a requirement
 - Return type is always `RuleResult` — never a plain dict or bool
 
 ## Invariants
@@ -35,7 +37,11 @@ def rule_name(df: pl.DataFrame, *, column: str, **kwargs) -> RuleResult:
 
 - `rule_id`: copy from the YAML `id`, hardcoded per function
 - `passed`: bool — the single verdict
-- `violation_rate`: fraction of rows that violated the rule (0.0–1.0) — always populate this
+- `violation_rate`: fraction of rows that violated the rule (0.0–1.0) — rules always populate
+  this with a measured value. `None` is reserved for the engine's error results (rule never
+  evaluated); a rule function must never return it. Table-level rules define their own
+  0.0–1.0 semantics and document them in the YAML description (e.g. `min_row_count` reports
+  the shortfall as a fraction of the threshold)
 - `error`: populate only when the rule cannot run due to misconfiguration; set `passed=False`
 
 ## YAML definition (one file per rule)

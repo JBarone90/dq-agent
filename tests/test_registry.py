@@ -10,6 +10,7 @@ EXPECTED_RULE_IDS = {
     "allowed_values",
     "regex_match",
     "freshness",
+    "min_row_count",
 }
 
 
@@ -79,6 +80,7 @@ MINIMAL_PARAMS = {
     "allowed_values": {"column": "status", "values": ["shipped"]},
     "regex_match": {"column": "email", "pattern": ".*"},
     "freshness": {"column": "created_at", "max_days": 365},
+    "min_row_count": {"min_rows": 1},
 }
 
 

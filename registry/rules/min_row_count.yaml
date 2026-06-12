@@ -1,0 +1,12 @@
+id: min_row_count
+name: Minimum Row Count
+description: Fails if the dataset has fewer than min_rows rows. Table-level rule; violation_rate is the shortfall as a fraction of min_rows.
+tags: [volume]
+severity: error
+parameters:
+  min_rows:
+    type: int
+    required: true
+execution:
+  module: dq_agent.rules.volume
+  function: min_row_count
