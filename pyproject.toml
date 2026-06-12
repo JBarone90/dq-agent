@@ -12,6 +12,7 @@ dependencies = [
 [project.optional-dependencies]
 postgres = [
     "connectorx>=0.3.0",
+    "pyarrow>=15.0.0",  # connectorx hands results to polars as Arrow tables
 ]
 agents = [
     "langchain-core>=0.3.0",

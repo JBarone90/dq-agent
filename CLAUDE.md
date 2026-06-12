@@ -25,8 +25,9 @@ src/dq_agent/
   registry.py        ← loads and indexes rule YAML at startup
   engine.py          ← runs an approved contract (list of rule IDs + params) against data; no LLM
   rules/             ← rule functions, one module per DQ category
-  profiler/          ← produces a structured JSON report (col stats, table stats, semantic hints)
-    connectors/      ← adapters that load data into Polars DataFrames (CSV, Postgres)
+  profiler.py        ← produces a structured JSON report (col stats, table stats, semantic hints);
+                       redact() strips raw cell values before any report reaches an LLM
+  connectors.py      ← adapters that load data into Polars DataFrames (CSV/Parquet, Postgres)
   agents/            ← LangGraph orchestration (Phase 3+); wraps profiler and registry as tools
 contracts/examples/  ← approved contract YAML artifacts; output of the human approval gate
 proposals/           ← creative mode outputs — rule specs awaiting developer review, never executed
