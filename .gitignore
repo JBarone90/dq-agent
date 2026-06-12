@@ -31,3 +31,7 @@ data/**/*.csv
 data/**/*.parquet
 data/**/*.json
 !data/synthetic/**
+
+# LangGraph dev server state
+.langgraph_api/
+!.env.example

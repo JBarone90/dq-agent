@@ -15,8 +15,11 @@ postgres = [
     "pyarrow>=15.0.0",  # connectorx hands results to polars as Arrow tables
 ]
 agents = [
+    "langchain>=0.3.0",                # init_chat_model: provider is a config string, not code
+    "langchain-google-genai>=2.0.0",   # default provider for the localhost demo (Gemini free tier)
     "langchain-core>=0.3.0",
     "langgraph>=0.2.0",
+    "langgraph-cli[inmem]>=0.2.0",     # `langgraph dev` serves the graph for agent-chat-ui
 ]
 dev = [
     "pytest>=8.0.0",

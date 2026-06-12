@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "scoping": "./src/dq_agent/agents/scoping.py:make_graph"
+  },
+  "env": ".env"
+}

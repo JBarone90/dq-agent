@@ -1,0 +1,313 @@
+"""Phase 3 scoping agent: the conversational front half of the tool.
+
+A single LangGraph agent (sub-agent split deferred until it earns its complexity)
+drives the scoping conversation: profile the dataset, discuss findings, query the
+registry, propose a parameterized rule suite, and route it through the human
+approval gate. The approval gate is a LangGraph `interrupt()` whose payload follows
+the agent-inbox `HumanInterrupt` schema, so agent-chat-ui renders accept/edit/respond
+controls without custom front-end work (see ACTION_PLAN.md, Interface implementation).
+
+The LLM never sees raw cell values (`profiler.redact()`) and never executes rules —
+its only product is a draft contract. Approval stamps `approved_at`/`approved_by` and
+persists the canonical YAML artifact; from there the deterministic engine takes over.
+
+Serve locally for agent-chat-ui with `uv run langgraph dev` (see langgraph.json).
+"""
+
+from __future__ import annotations
+
+import getpass
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Annotated, Any
+
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import SystemMessage, ToolMessage
+from langchain_core.tools import InjectedToolCallId, tool
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import InjectedState, ToolNode
+from langgraph.types import Command, interrupt
+
+from dq_agent import connectors, profiler
+from dq_agent.models import Contract, ContractRule
+from dq_agent.registry import Registry
+
+DEFAULT_MODEL = "google_genai:gemini-2.5-flash"
+DEFAULT_RULES_DIR = Path("registry/rules")
+DEFAULT_CONTRACTS_DIR = Path("contracts")
+
+SYSTEM_PROMPT = """\
+You are a data quality scoping assistant. You help a dataset owner — who may not be
+an engineer — turn their knowledge of a dataset into an approved data quality contract.
+
+Workflow, in order:
+1. Ask for the dataset (a local CSV or Parquet path) and its business context.
+2. Call profile_dataset. The profile is redacted: aggregates, types, null rates and
+   semantic hints only — never raw cell values. Walk the owner through what stands out.
+3. Ask about anything statistics cannot decide: which columns must never be null,
+   valid value sets, expected ranges, freshness requirements.
+4. Call list_rules to see what the registry offers; only ever use rule ids and
+   parameters that exist there. If a real issue has no matching rule, say so plainly
+   rather than forcing a rule that does not fit.
+5. Call propose_contract with your suggested rule suite and explain the reasoning
+   behind every rule. Iterate until the owner is satisfied.
+6. When the owner explicitly confirms, call request_approval. Approval is theirs to
+   give through the review form, never yours to assume.
+
+Be concrete and concise. One question at a time. Severity defaults come from the
+registry; override per rule only when the owner's context justifies it.
+"""
+
+
+class ScopingState(MessagesState):
+    profile: dict[str, Any] | None  # redacted profile report of the dataset under scoping
+    draft: dict[str, Any] | None  # unapproved contract awaiting the approval gate
+    contract_path: str | None  # set once the approved YAML artifact is persisted
+
+
+class ProposedRule(ContractRule):
+    """A contract rule as proposed by the agent — same shape, separate name so the
+    tool schema reads as a proposal, not an approved artifact."""
+
+
+def _make_tools(registry: Registry) -> list:
+    @tool
+    def profile_dataset(
+        path: str, tool_call_id: Annotated[str, InjectedToolCallId]
+    ) -> Command:
+        """Profile a local CSV or Parquet dataset. Returns a redacted statistical
+        report: column types, null rates, uniqueness, distributions, semantic hints.
+        Contains no raw cell values."""
+        file = Path(path)
+        if not file.exists():
+            return Command(update={"messages": [
+                ToolMessage(f"error: no file at '{path}'", tool_call_id=tool_call_id)
+            ]})
+        if file.suffix == ".csv":
+            df = connectors.load_csv(file)
+        elif file.suffix == ".parquet":
+            df = connectors.load_parquet(file)
+        else:
+            return Command(update={"messages": [
+                ToolMessage(
+                    f"error: unsupported file type '{file.suffix}' (csv or parquet only)",
+                    tool_call_id=tool_call_id,
+                )
+            ]})
+
+        report = profiler.redact(profiler.profile(df, dataset=file.stem))
+        report_json = report.model_dump_json(exclude_none=True)
+        return Command(update={
+            "profile": report.model_dump(mode="json"),
+            "draft": None,  # a new dataset invalidates any pending draft
+            "messages": [ToolMessage(report_json, tool_call_id=tool_call_id)],
+        })
+
+    @tool
+    def list_rules(tags: list[str] | None = None) -> str:
+        """List the rules available in the registry, optionally filtered by tags
+        (e.g. completeness, uniqueness, validity, freshness, volume). Returns each
+        rule's id, description, tags, default severity and parameter specs."""
+        lines = []
+        for rule_id in registry.rule_ids:
+            rule = registry.get(rule_id)
+            if tags and not set(tags) & set(rule.tags):
+                continue
+            params = ", ".join(
+                f"{name}: {spec.type}"
+                + ("" if spec.required else f" = {spec.default!r}")
+                for name, spec in rule.parameters.items()
+            )
+            lines.append(
+                f"- {rule.id} [{', '.join(rule.tags)}] (severity: {rule.severity})\n"
+                f"  {rule.description}\n"
+                f"  params: {params or 'none'}"
+            )
+        return "\n".join(lines) or "no rules match those tags"
+
+    @tool
+    def propose_contract(
+        rules: list[ProposedRule],
+        state: Annotated[dict, InjectedState],
+        tool_call_id: Annotated[str, InjectedToolCallId],
+    ) -> Command:
+        """Propose a draft contract for the profiled dataset: the list of rule ids
+        with parameters (and optional severity overrides) you recommend. The draft
+        is validated against the registry and shown to the owner for discussion —
+        it is not approved or executed by this call."""
+        report = state.get("profile")
+        if report is None:
+            return Command(update={"messages": [
+                ToolMessage(
+                    "error: profile the dataset first", tool_call_id=tool_call_id
+                )
+            ]})
+
+        errors = _validate_rules(rules, registry)
+        if errors:
+            return Command(update={"messages": [
+                ToolMessage("invalid proposal: " + "; ".join(errors),
+                            tool_call_id=tool_call_id)
+            ]})
+
+        draft = Contract(
+            dataset=report["dataset"],
+            columns={c["name"]: c["dtype"] for c in report["columns"]},
+            rules=[ContractRule(**r.model_dump()) for r in rules],
+        )
+        return Command(update={
+            "draft": draft.model_dump(mode="json"),
+            "messages": [ToolMessage(
+                "draft recorded — review it with the owner:\n" + draft.to_yaml(),
+                tool_call_id=tool_call_id,
+            )],
+        })
+
+    @tool
+    def request_approval() -> None:
+        """Send the current draft contract to the human approval gate. Call only
+        after the owner has explicitly confirmed the proposal in conversation."""
+        # never executed: the graph routes this call to the approval node
+
+    return [profile_dataset, list_rules, propose_contract, request_approval]
+
+
+def _validate_rules(rules: list[ContractRule], registry: Registry) -> list[str]:
+    errors = []
+    for rule in rules:
+        try:
+            errors.extend(registry.validate_params(rule.rule_id, rule.params))
+        except KeyError:
+            errors.append(f"unknown rule '{rule.rule_id}'")
+    return errors
+
+
+def _approver(args: dict[str, Any] | None) -> str:
+    # localhost demo: single user, no auth — the OS user is the honest identity.
+    # A deployed UI must supply approved_by in the interrupt response instead.
+    if args and args.get("approved_by"):
+        return args["approved_by"]
+    return os.environ.get("DQ_AGENT_APPROVER") or getpass.getuser()
+
+
+def _approval_node(contracts_dir: Path, registry: Registry):
+    def approval(state: ScopingState) -> Command:
+        # answer every pending tool call: the approval call gets the gate outcome,
+        # anything bundled alongside it is refused
+        pending = state["messages"][-1].tool_calls
+        approval_id = next(
+            tc["id"] for tc in pending if tc["name"] == "request_approval"
+        )
+        replies = [
+            ToolMessage("skipped: resolve the approval request first",
+                        tool_call_id=tc["id"])
+            for tc in pending if tc["id"] != approval_id
+        ]
+
+        def respond(text: str, **update: Any) -> Command:
+            return Command(
+                update={"messages": [*replies, ToolMessage(text, tool_call_id=approval_id)],
+                        **update},
+                goto="agent",
+            )
+
+        draft = state.get("draft")
+        if draft is None:
+            return respond("error: no draft contract — call propose_contract first")
+
+        contract = Contract.model_validate(draft)
+        # agent-inbox HumanInterrupt schema: agent-chat-ui renders this natively
+        response = interrupt([{
+            "action_request": {"action": "approve_contract", "args": {"contract": draft}},
+            "config": {"allow_accept": True, "allow_edit": True,
+                       "allow_respond": True, "allow_ignore": False},
+            "description": "Review the proposed data quality contract:\n\n"
+                           + contract.to_yaml(),
+        }])
+        if isinstance(response, list):
+            response = response[0]
+        kind, args = response.get("type"), response.get("args")
+
+        if kind == "edit":
+            contract = Contract.model_validate(args["args"]["contract"])
+            errors = _validate_rules(contract.rules, registry)
+            if errors:
+                return respond("owner's edited contract is invalid, fix and re-propose: "
+                               + "; ".join(errors))
+            kind = "accept"
+
+        if kind == "accept":
+            contract.approved_at = datetime.now(timezone.utc)
+            contract.approved_by = _approver(args if isinstance(args, dict) else None)
+            contracts_dir.mkdir(parents=True, exist_ok=True)
+            filename = re.sub(r"[^A-Za-z0-9_-]", "_", contract.dataset) + ".yaml"
+            path = contracts_dir / filename
+            path.write_text(contract.to_yaml())
+            return respond(
+                f"contract approved by {contract.approved_by} and saved to {path}",
+                draft=None,
+                contract_path=str(path),
+            )
+
+        # "response" (free-text feedback) and anything unrecognized: no approval
+        return respond(f"owner did not approve; feedback: {args}")
+
+    return approval
+
+
+def build_graph(
+    *,
+    model: BaseChatModel | None = None,
+    registry: Registry | None = None,
+    contracts_dir: Path | str = DEFAULT_CONTRACTS_DIR,
+    checkpointer: Any = None,
+):
+    """Compile the scoping graph. All collaborators are injectable for tests;
+    defaults serve the localhost demo (model from $DQ_AGENT_MODEL, repo-root
+    registry and contracts directories)."""
+    if model is None:
+        from langchain.chat_models import init_chat_model
+
+        model_id = os.environ.get("DQ_AGENT_MODEL", DEFAULT_MODEL)
+        try:
+            model = init_chat_model(model_id)
+        except Exception as exc:
+            raise RuntimeError(
+                f"could not initialise LLM '{model_id}': {exc}\n"
+                "Is the provider's langchain package installed and its API key "
+                "set in .env? (see .env.example)"
+            ) from exc
+    if registry is None:
+        registry = Registry(DEFAULT_RULES_DIR)
+
+    tools = _make_tools(registry)
+    model = model.bind_tools(tools)
+
+    def agent(state: ScopingState) -> dict:
+        messages = [SystemMessage(SYSTEM_PROMPT), *state["messages"]]
+        return {"messages": [model.invoke(messages)]}
+
+    def route(state: ScopingState) -> str:
+        calls = state["messages"][-1].tool_calls
+        if not calls:
+            return END
+        if any(tc["name"] == "request_approval" for tc in calls):
+            return "approval"
+        return "tools"
+
+    builder = StateGraph(ScopingState)
+    builder.add_node("agent", agent)
+    builder.add_node("tools", ToolNode([t for t in tools if t.name != "request_approval"]))
+    builder.add_node("approval", _approval_node(Path(contracts_dir), registry))
+    builder.add_edge(START, "agent")
+    builder.add_conditional_edges("agent", route, ["tools", "approval", END])
+    builder.add_edge("tools", "agent")
+    return builder.compile(checkpointer=checkpointer)
+
+
+def make_graph():
+    """Zero-arg factory for LangGraph Server (referenced from langgraph.json);
+    the server injects its own checkpointer."""
+    return build_graph()
