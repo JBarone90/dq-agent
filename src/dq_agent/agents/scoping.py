@@ -16,6 +16,7 @@ Serve locally for agent-chat-ui with `uv run langgraph dev` (see langgraph.json)
 
 from __future__ import annotations
 
+import asyncio
 import getpass
 import os
 import re
@@ -307,7 +308,9 @@ def build_graph(
     return builder.compile(checkpointer=checkpointer)
 
 
-def make_graph():
+async def make_graph():
     """Zero-arg factory for LangGraph Server (referenced from langgraph.json);
-    the server injects its own checkpointer."""
-    return build_graph()
+    the server injects its own checkpointer. Async because the server invokes
+    factories on its event loop, and build_graph does blocking work (registry
+    directory scan, model init) that must run on a worker thread."""
+    return await asyncio.to_thread(build_graph)
