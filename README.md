@@ -40,8 +40,8 @@ dq-agent/
 │   ├── engine.py          # Execution engine — runs contracts deterministically
 │   ├── models.py          # RuleResult, Contract — shared Pydantic models
 │   ├── rules/             # Rule functions, one module per DQ category
-│   ├── profiler/          # Dataset profiler + data source connectors
-│   │   └── connectors/    # CSV (dev), Postgres (primary target)
+│   ├── profiler.py        # Dataset profiler — stats, semantic hints, redacted reports
+│   ├── connectors.py      # Load CSV/Parquet (dev), Postgres (primary target) into Polars
 │   └── agents/            # LangGraph orchestration (Phase 3+)
 ├── registry/
 │   └── rules/             # Rule definitions as YAML — the core differentiator
@@ -70,6 +70,185 @@ Run tests:
 uv run pytest
 ```
 
+The Postgres integration test (identical profiler report from a file and a live
+table) skips unless `DQ_TEST_POSTGRES_URI` is set. To run it
+against a throwaway container:
+
+```bash
+docker run -d --name dq-test-pg -e POSTGRES_PASSWORD=dq -p 5433:5432 postgres:16
+docker exec dq-test-pg psql -U postgres -c "CREATE TABLE orders (
+  order_id INTEGER, customer_id TEXT, email TEXT, amount DOUBLE PRECISION,
+  status TEXT, created_at DATE, phone TEXT);"
+cat data/synthetic/orders.csv | docker exec -i dq-test-pg psql -U postgres \
+  -c "\copy orders FROM STDIN WITH (FORMAT csv, HEADER true)"
+
+DQ_TEST_POSTGRES_URI=postgresql://postgres:dq@localhost:5433/postgres uv run pytest
+docker rm -f dq-test-pg
+```
+
+---
+
+## The two workflows
+
+Everything in this tool belongs to one of two workflows that never overlap in time.
+They share only two things: connectors (both start by loading data into Polars) and
+the contract YAML (one workflow produces it, the other consumes it).
+
+**Scoping time** — once per dataset, human in the loop, LLM allowed:
+
+```text
+connectors.load_csv / load_postgres
+      │  Polars DataFrame
+      ▼
+profiler.profile()  ──►  full report          (raw value examples — stays local)
+      │
+      │  profiler.redact()
+      ▼
+redacted report     ──►  scoping conversation (Phase 3: agent + registry tags
+      │                                        + your business context)
+      ▼
+proposed contract   ──►  human approval gate  ──►  contract YAML (persisted)
+```
+
+**Run time** — every pipeline run, deterministic, no LLM anywhere:
+
+```text
+connectors.load_postgres (fresh data)     approved contract YAML
+      │  Polars DataFrame                       │
+      └───────────────┬─────────────────────────┘
+                      ▼
+         engine.run(contract, df, registry)
+                      ▼
+         list[RuleResult]  ──►  pipeline gates on passed / severity
+```
+
+The profiler informs which rules to _propose_; the engine _executes_ what was
+approved. The engine never profiles, the profiler never executes, and the LLM
+never touches either — it only reads redacted profiler reports during scoping.
+
+### Worked example
+
+The repo ships a dirty-by-design dataset (`data/synthetic/orders.csv` — 20 order
+rows with known issues: null customer ids, a duplicate order id, a negative amount,
+a malformed email, an unexpected status, a stale date) and an approved contract for
+it (`contracts/examples/orders.yaml`).
+
+```python
+from pathlib import Path
+import yaml
+
+from dq_agent.connectors import load_csv
+from dq_agent.engine import run
+from dq_agent.models import Contract
+from dq_agent.profiler import profile, redact
+from dq_agent.registry import Registry
+
+# scoping time: load, profile, redact
+df = load_csv("data/synthetic/orders.csv")
+report = profile(df, dataset="orders")
+safe = redact(report)          # the only variant an LLM may ever see
+```
+
+The redacted report keeps aggregates and hints, drops value examples — the `email`
+column profiles as:
+
+```json
+{
+  "name": "email",
+  "dtype": "String",
+  "null_rate": 0.0,
+  "uniqueness_ratio": 1.0,
+  "min": null,
+  "max": null,
+  "top_values": null,
+  "semantic_hint": "email"
+}
+```
+
+Scoping (Phase 3) turns that report plus your business context into a proposed
+contract; today the contract is hand-written. Run time is three lines:
+
+```python
+contract = Contract.model_validate(
+    yaml.safe_load(Path("contracts/examples/orders.yaml").read_text())
+)
+results = run(contract, df, Registry(Path("registry/rules")))
+```
+
+Every baked-in issue is caught:
+
+```text
+min_row_count   PASS  0.0
+null_check      FAIL  0.1     # 2 of 20 customer_id values are null
+unique_check    FAIL  0.05    # order_id 1001 appears twice
+range_check     FAIL  0.05    # one negative amount
+allowed_values  FAIL  0.05    # status 'refunded' not in the approved set
+regex_match     FAIL  0.05    # 'not-an-email'
+freshness       FAIL  0.05    # one order from 2020
+```
+
+A pipeline gates on these results directly — e.g. fail the Airflow task when any
+rule with severity `error` has `passed == False`.
+
+---
+
+## Anatomy of a rule
+
+Every rule is two artifacts that share an id: a YAML definition (what the agent and
+humans see) and a pure function (what the engine runs).
+
+The YAML in `registry/rules/` carries everything needed to discover, validate, and
+route the rule — tags the scoping agent queries, parameter specs that contracts are
+validated against, a default severity, and a pointer to the implementation:
+
+```yaml
+# registry/rules/null_check.yaml
+id: null_check
+name: Null Check
+description: Fails if the null rate in a column exceeds max_null_rate.
+tags: [completeness]
+severity: error
+parameters:
+  column:        {type: str, required: true}
+  max_null_rate: {type: float, default: 0.0}
+execution:
+  module: dq_agent.rules.completeness
+  function: null_check
+```
+
+The function in `src/dq_agent/rules/` is the implementation: Polars DataFrame in,
+`RuleResult` out — no side effects, no I/O, no LLM:
+
+```python
+# src/dq_agent/rules/completeness.py
+def null_check(df: pl.DataFrame, *, column: str, max_null_rate: float = 0.0) -> RuleResult:
+    violation_rate = df[column].null_count() / len(df)
+    return RuleResult(
+        rule_id="null_check",
+        passed=violation_rate <= max_null_rate,
+        violation_rate=violation_rate,
+    )
+```
+
+The registry connects the two at startup: it loads every YAML, indexes rules by id
+and tags, and resolves `execution.module` / `execution.function` to the callable on
+first use. The engine never imports rule modules directly — all routing goes through
+the registry. A contract then activates a rule for one dataset by id, with parameters
+chosen during scoping:
+
+```yaml
+- rule_id: null_check
+  params: {column: customer_id, max_null_rate: 0.0}
+```
+
+For each contract entry the engine validates params against the spec, resolves the
+callable, runs it, and folds any failure into that rule's result (`error` set,
+`violation_rate` null) — one broken rule never blocks the rest. Empty datasets are
+rejected before any rule runs: on zero rows every rule would pass vacuously.
+
+Adding a rule never touches the engine: one YAML file, one function, tests.
+Authoring standards live in `.claude/roles/rule-author.md`.
+
 ---
 
 ## Development phases
@@ -79,50 +258,9 @@ See [ACTION_PLAN.md](ACTION_PLAN.md) for the full roadmap.
 | Phase | Focus                                   | Status  |
 | ----- | --------------------------------------- | ------- |
 | 1     | Rule registry + execution engine        | done    |
-| 2     | Deterministic profiler (CSV + Postgres) | planned |
+| 2     | Deterministic profiler (CSV + Postgres) | done    |
 | 3     | Scoping agent with human approval gate  | planned |
 | 4     | Creative mode — novel rule proposals    | planned |
-
----
-
-## Phase 1 internals: rule → result
-
-This diagram shows how a single rule check flows from configuration to output.
-
-```text
-registry/rules/null_check.yaml
-  │  id, parameters, execution.module, execution.function
-  │
-  ▼
-Registry (startup)
-  │  loads every YAML into RuleDefinition via Pydantic
-  │  indexes by rule_id
-  │  caches callables via importlib on first resolve()
-  │
-  ▼
-Contract (approved YAML)             DataFrame (Polars)
-  │  dataset, list of                │  loaded by a connector
-  │  { rule_id, params }             │  (CSV, Postgres, …)
-  │                                  │
-  └──────────────┬───────────────────┘
-                 ▼
-           Engine  run()
-                 │
-                 │  for each ContractRule:
-                 │    1. registry.validate_params()   ← required params present?
-                 │    2. registry.resolve()           ← importlib → callable
-                 │    3. fn(df, **params)             ← pure rule function
-                 │    4. catch any error → RuleResult(error=…)
-                 │
-                 ▼
-         list[RuleResult]
-           rule_id · passed · violation_rate · error?
-```
-
-Key invariants:
-- The engine never imports rule modules directly — all routing goes through the registry.
-- One failing rule does not block the others; errors are captured per-result.
-- No LLM is involved anywhere in this flow. The agent layer (Phase 3) sits above it.
 
 ---
 

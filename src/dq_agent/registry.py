@@ -1,3 +1,15 @@
+"""Loads and indexes the YAML rule definitions from registry/rules/ at startup.
+
+Rules are config, the engine is the runner: each rule YAML names the module and
+function that implement it, and the registry resolves that reference (cached
+importlib lookup). Adding a rule means adding a YAML file plus a pure function —
+never an engine change.
+
+The registry serves both workflows: at scoping time its tags and parameter specs
+are the catalogue the agent queries when proposing a contract (Phase 3); at run
+time the engine uses it to validate params and route rule_ids to callables.
+"""
+
 from __future__ import annotations
 
 import importlib

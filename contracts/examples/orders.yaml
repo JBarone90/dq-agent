@@ -1,0 +1,23 @@
+# Approved contract for the synthetic orders dataset (data/synthetic/orders.csv).
+# In Phase 3 this artifact is produced by the scoping agent + human approval gate;
+# until then contracts are hand-written. This one is exercised by the test suite
+# and by the worked example in the README.
+#
+# freshness pins as_of so the contract evaluates identically on any day.
+dataset: orders
+approved_at: 2026-06-12T00:00:00Z
+rules:
+  - rule_id: min_row_count
+    params: {min_rows: 10}
+  - rule_id: null_check
+    params: {column: customer_id, max_null_rate: 0.0}
+  - rule_id: unique_check
+    params: {column: order_id}
+  - rule_id: range_check
+    params: {column: amount, min_val: 0.0}
+  - rule_id: allowed_values
+    params: {column: status, values: [shipped, delivered, pending, cancelled]}
+  - rule_id: regex_match
+    params: {column: email, pattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'}
+  - rule_id: freshness
+    params: {column: created_at, max_days: 365, as_of: 2026-06-12}
