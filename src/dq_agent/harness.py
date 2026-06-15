@@ -15,9 +15,8 @@ never actually measured.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import polars as pl
+from pydantic import BaseModel
 
 from dq_agent.engine import run
 from dq_agent.models import Contract
@@ -27,8 +26,7 @@ from dq_agent.registry import Registry
 IssueKey = tuple[str, str | None]
 
 
-@dataclass(frozen=True)
-class HarnessScore:
+class HarnessScore(BaseModel, frozen=True):
     caught: list[IssueKey]    # expected issues the proposal correctly detected
     missed: list[IssueKey]    # expected issues the proposal failed to detect
     spurious: list[IssueKey]  # rules that failed for issues not in expected_failures
