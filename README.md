@@ -1,5 +1,9 @@
 # dq-agent
 
+[![tests](https://github.com/OWNER/dq-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/OWNER/dq-agent/actions/workflows/tests.yml)
+
+<!-- Replace OWNER above with your GitHub username/org once the repo is pushed. -->
+
 A conversational data quality framework for anyone who owns, curates, or delivers a dataset.
 
 Point the tool at a dataset, describe its business context, and it proposes a tested rule
