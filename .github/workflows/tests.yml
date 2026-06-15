@@ -26,5 +26,7 @@ jobs:
         run: uv sync --extra dev --extra agents
 
       - name: Run tests
-        # integration (live LLM) and Postgres tests skip without their env vars
-        run: uv run pytest --cov=src/dq_agent
+        # integration tests are deselected (never collected) so CI never makes a live
+        # LLM call even if DQ_AGENT_MODEL leaks into the environment; the Postgres test
+        # still self-skips without DQ_TEST_POSTGRES_URI
+        run: uv run pytest -m "not integration" --cov=src/dq_agent
