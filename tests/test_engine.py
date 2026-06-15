@@ -103,8 +103,9 @@ def test_run_bad_rule_does_not_block_others(orders_df, registry):
     assert results[1].passed is True
 
 
-def test_run_empty_dataset_fails_every_rule(orders_df, registry):
-    # vacuous pass on zero rows is a silent failure mode; the engine refuses up front
+def test_run_empty_dataset_handles_column_and_table_rules(orders_df, registry):
+    # vacuous pass on zero rows is a silent failure mode; column rules report it as
+    # un-evaluated, while table-level rules (min_row_count) still measure a real failure
     from tests.test_registry import MINIMAL_PARAMS
 
     contract = _contract(*[
@@ -112,11 +113,22 @@ def test_run_empty_dataset_fails_every_rule(orders_df, registry):
         for rule_id, params in MINIMAL_PARAMS.items()
     ])
     results = run(contract, orders_df.head(0), registry)
+    by_id = {r.rule_id: r for r in results}
     assert len(results) == len(MINIMAL_PARAMS)
-    for result in results:
-        assert result.passed is False, f"'{result.rule_id}' passed on an empty dataset"
+
+    # min_row_count is table-level: it evaluates on zero rows and fails (0 < 1)
+    mrc = by_id["min_row_count"]
+    assert mrc.passed is False
+    assert mrc.error is None
+    assert mrc.violation_rate == 1.0
+
+    # every column rule reports the un-evaluated sentinel instead of a measured rate
+    for rule_id, result in by_id.items():
+        if rule_id == "min_row_count":
+            continue
+        assert result.passed is False, f"'{rule_id}' passed on an empty dataset"
         assert result.error == "cannot evaluate: dataset is empty"
-        assert result.violation_rate is None, "unevaluated rule must not report a measured rate"
+        assert result.violation_rate is None
 
 
 def test_run_empty_contract_returns_empty_list(orders_df, registry):

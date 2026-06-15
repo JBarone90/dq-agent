@@ -313,8 +313,10 @@ chosen during scoping:
 
 For each contract entry the engine validates params against the spec, resolves the
 callable, runs it, and folds any failure into that rule's result (`error` set,
-`violation_rate` null) — one broken rule never blocks the rest. Empty datasets are
-rejected before any rule runs: on zero rows every rule would pass vacuously.
+`violation_rate` null) — one broken rule never blocks the rest. On an empty dataset a
+column rule cannot be evaluated (zero rows would divide by zero / pass vacuously) and
+reports an un-evaluated result, while table-level rules like `min_row_count` still run
+— an empty table is exactly their concern.
 
 Adding a rule never touches the engine: one YAML file, one function, tests.
 Authoring standards live in `.claude/roles/rule-author.md`.

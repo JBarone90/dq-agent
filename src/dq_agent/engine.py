@@ -8,9 +8,11 @@ scoping time (see profiler.py).
 Pre-flight checks live in the engine, not in individual rules and not in callers:
 the engine is the single gatekeeper of "is this execution valid at all". Approval
 and schema drift raise — they are contract lifecycle events that route the owner
-back to scoping, not data measurements. An empty dataset fails every rule instead
-of raising: the contract is still valid, today's data is not. Rules stay pure
-measurements; callers cannot forget the checks.
+back to scoping, not data measurements. An empty dataset does not raise: the
+contract is still valid, today's data is not. A column rule cannot be evaluated on
+zero rows (it would divide by zero / pass vacuously) and reports an un-evaluated
+result; a table-level rule like min_row_count still runs — an empty table is
+exactly its concern. Rules stay pure measurements; callers cannot forget the checks.
 """
 
 from __future__ import annotations
@@ -37,20 +39,8 @@ def run(contract: Contract, df: pl.DataFrame, registry: Registry) -> list[RuleRe
         )
     _check_schema_drift(contract, df)
 
-    # an empty dataset cannot vacuously satisfy any rule — fail all of them up front
-    if df.is_empty():
-        return [
-            RuleResult(
-                rule_id=contract_rule.rule_id,
-                passed=False,
-                violation_rate=None,
-                error="cannot evaluate: dataset is empty",
-                severity=_effective_severity(contract_rule, registry),
-            )
-            for contract_rule in contract.rules
-        ]
-
     results: list[RuleResult] = []
+    empty = df.is_empty()
 
     for contract_rule in contract.rules:
         rule_id = contract_rule.rule_id
@@ -64,6 +54,19 @@ def run(contract: Contract, df: pl.DataFrame, registry: Registry) -> list[RuleRe
                     passed=False,
                     violation_rate=None,
                     error="; ".join(errors),
+                    severity=_effective_severity(contract_rule, registry),
+                ))
+                continue
+
+            # on zero rows a column rule would divide by zero / pass vacuously, so it
+            # cannot be evaluated; table-level rules still run (an empty table is their
+            # concern) and report a real failure
+            if empty and not _is_table_level(rule_id, registry):
+                results.append(RuleResult(
+                    rule_id=rule_id,
+                    passed=False,
+                    violation_rate=None,
+                    error="cannot evaluate: dataset is empty",
                     severity=_effective_severity(contract_rule, registry),
                 ))
                 continue
@@ -123,6 +126,12 @@ def _dtype_family(dtype: str) -> str:
     if s.startswith(("str", "utf8", "categorical", "enum")):
         return "string"
     return s
+
+
+def _is_table_level(rule_id: str, registry: Registry) -> bool:
+    # a rule is table-level when it takes no column parameter — it measures the table,
+    # not a column; the registry definition is the source of truth
+    return "column" not in registry.get(rule_id).parameters
 
 
 def _effective_severity(contract_rule: ContractRule, registry: Registry) -> str | None:
