@@ -6,7 +6,7 @@
 
 **dq-agent is a Python toolkit for defining and running data-quality checks on a dataset.** You point it at your data and describe its business context; it profiles the data and helps you assemble a **contract** — a list of quality rules with parameters. You approve the contract once, and from then on it runs **deterministically** on every pipeline run, returning pass/fail per rule.
 
-The twist: a large language model helps you _author_ the contract through a conversation, but it **never touches your data at execution time**. Approved rules run as ordinary, tested Python — not prompts. The LLM is a reasoning layer for scoping, not an execution engine.
+A large language model helps you _author_ the contract through a conversation, but it **never touches your data at execution time**. Approved rules run as ordinary, tested Python — not prompts. The LLM is a reasoning layer for scoping, not an execution engine.
 
 It ships as a **library** (`import dq_agent`) plus a **LangGraph dev server** for the optional chat interface — there is no CLI yet.
 
@@ -129,7 +129,7 @@ cp .env.example .env       # then put your GOOGLE_API_KEY in .env
 
 Get a free key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
 
-**The provider is a config value, not code.** At startup the agent reads `DQ_AGENT_MODEL` (a `provider:model` string) from `.env` and passes it to LangChain's `init_chat_model`, which dynamically imports the matching `langchain-<provider>` integration. So switching providers is two steps — add the integration package, point `DQ_AGENT_MODEL` at it — and zero code changes:
+**The provider is a config value, not code.** At startup the agent reads `DQ_AGENT_MODEL` (a `provider:model` string) from `.env` and passes it to LangChain's `init_chat_model`, which dynamically imports the matching `langchain-<provider>` integration. Switching providers is two steps, no code changes:
 
 | Provider         | Add the package              | Set in `.env`                                                          |
 | ---------------- | ---------------------------- | ---------------------------------------------------------------------- |
@@ -162,7 +162,7 @@ pnpm install && pnpm dev   # then open http://localhost:3000 and enter the same 
 
 Then chat: point the agent at `data/synthetic/orders.csv`, describe the business context, and iterate on its proposal. When you confirm, the approval gate renders as an interrupt card (accept / edit / respond); accepting writes the approved contract to `contracts/<dataset>.yaml`.
 
-> **Free-tier rate limits:** a single scoping turn makes several model requests (the agent loop calls the model once per tool round), so Gemini's free-tier requests-per-minute cap is easy to hit mid-conversation. If you see 429s, wait a minute and continue — the thread keeps its state — or switch `DQ_AGENT_MODEL` to a model with a higher free RPM (e.g. `google_genai:gemini-2.5-flash-lite`).
+> **Free-tier rate limits:** a single scoping turn makes several model requests (the agent loop calls the model once per tool round), so Gemini's free-tier requests-per-minute cap is easy to hit mid-conversation. If you see 429s, wait a minute and continue (the thread keeps its state), or switch `DQ_AGENT_MODEL` to a model with a higher free RPM (e.g. `google_genai:gemini-2.5-flash-lite`).
 
 The approval interrupt follows the agent-inbox `HumanInterrupt` schema, so agent-chat-ui renders the contract review (accept / edit / respond) natively.
 
@@ -292,7 +292,7 @@ These exist only at scoping time, to help a human and an LLM produce a good cont
 
 #### Profiler
 
-**The agent's window into the dataset.** The profiler (`profiler.py`) is the main tool the agent uses to reason about data it cannot see directly. `profile()` produces a structured report — per-column stats (null rate, uniqueness, min/max, distribution), table stats, and semantic hints (`email`, `phone`, `id`, `date`) — that tells the agent _which rules are worth proposing_ (a column hinted `email` with a few malformed values suggests a `regex_match`; a high null rate suggests a `null_check`). It is pure, deterministic code; the LLM consults its output, it does not run it.
+**The agent's window into the dataset.** The profiler (`profiler.py`) is the main tool the agent uses to reason about data it cannot see directly. `profile()` produces a structured report — per-column stats, table stats, and semantic hints — that tells the agent _which rules are worth proposing_: a column hinted `email` with a few malformed values suggests a `regex_match`; a high null rate suggests a `null_check`. Per-column stats include null rate, uniqueness, min/max, and distribution; semantic hints cover `email`, `phone`, `id`, and `date`. It is pure, deterministic code; the LLM consults its output, it does not run it.
 
 #### Redaction
 
