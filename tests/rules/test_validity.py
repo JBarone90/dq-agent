@@ -79,3 +79,12 @@ def test_regex_match_ignores_nulls():
     result = regex_match(df, column="x", pattern=r"^\d+$")
     assert result.passed is False
     assert result.violation_rate == 0.5
+
+
+def test_regex_match_is_full_match_not_substring():
+    # an unanchored pattern must match the WHOLE value, not merely appear inside it.
+    # a substring search would wrongly pass '12-AB-99' (it contains digits)
+    df = pl.DataFrame({"code": ["12345", "12-AB-99", "xx"]})
+    result = regex_match(df, column="code", pattern=r"\d+")
+    assert result.passed is False
+    assert result.violation_rate == 2 / 3  # only '12345' is all-digits

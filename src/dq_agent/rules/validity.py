@@ -44,8 +44,13 @@ def allowed_values(df: pl.DataFrame, *, column: str, values: list) -> RuleResult
 
 
 def regex_match(df: pl.DataFrame, *, column: str, pattern: str) -> RuleResult:
+    # full-match semantics: the whole value must match, not merely contain the pattern.
+    # str.contains is a regex *search*, so we anchor; the non-capturing group keeps any
+    # top-level alternation (a|b) inside the anchors. Re-anchoring an already-anchored
+    # pattern is harmless.
+    anchored = f"^(?:{pattern})$"
     violation_count = df.select(
-        (~pl.col(column).str.contains(pattern) & pl.col(column).is_not_null()).alias("v")
+        (~pl.col(column).str.contains(anchored) & pl.col(column).is_not_null()).alias("v")
     )["v"].sum()
     return RuleResult(
         rule_id="regex_match",
