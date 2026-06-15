@@ -214,3 +214,16 @@ def test_run_matching_schema_passes_drift_check(orders_df, registry):
     )
     results = run(contract, orders_df, registry)
     assert results[0].error is None
+
+
+def test_run_same_family_dtype_is_not_drift(orders_df, registry):
+    # Int32 (contract) vs Int64 (live) is the same coarse family — a cross-source
+    # artifact (e.g. CSV vs Postgres), not real drift, so it must not raise
+    columns = {name: str(dtype) for name, dtype in orders_df.schema.items()}
+    columns["order_id"] = "Int32"
+    contract = _contract(
+        ContractRule(rule_id="null_check", params={"column": "order_id"}),
+        columns=columns,
+    )
+    results = run(contract, orders_df, registry)
+    assert results[0].error is None

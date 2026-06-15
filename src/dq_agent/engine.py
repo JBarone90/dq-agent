@@ -88,8 +88,6 @@ def _check_schema_drift(contract: Contract, df: pl.DataFrame) -> None:
     if contract.columns is None:
         return
     live = {name: str(dtype) for name, dtype in df.schema.items()}
-    if live == contract.columns:
-        return
 
     drifts = []
     for name in sorted(set(contract.columns) - set(live)):
@@ -97,14 +95,34 @@ def _check_schema_drift(contract: Contract, df: pl.DataFrame) -> None:
     for name in sorted(set(live) - set(contract.columns)):
         drifts.append(f"column '{name}' added")
     for name in sorted(set(live) & set(contract.columns)):
-        if live[name] != contract.columns[name]:
+        # compare coarse families, not exact dtype strings, so a cross-source load
+        # (CSV Int64 vs Postgres Int32) is not mistaken for drift
+        if _dtype_family(live[name]) != _dtype_family(contract.columns[name]):
             drifts.append(
                 f"column '{name}' changed type: {contract.columns[name]} -> {live[name]}"
             )
+    if not drifts:
+        return
     raise SchemaDriftError(
         f"schema drift for dataset '{contract.dataset}', contract needs re-scoping: "
         + "; ".join(drifts)
     )
+
+
+def _dtype_family(dtype: str) -> str:
+    """Collapse a concrete Polars dtype string to a coarse family for drift comparison."""
+    s = dtype.lower()
+    if s.startswith(("int", "uint")):
+        return "integer"
+    if s.startswith(("float", "decimal")):
+        return "float"
+    if s.startswith(("date", "time", "duration")):
+        return "temporal"
+    if s.startswith("bool"):
+        return "boolean"
+    if s.startswith(("str", "utf8", "categorical", "enum")):
+        return "string"
+    return s
 
 
 def _effective_severity(contract_rule: ContractRule, registry: Registry) -> str | None:
