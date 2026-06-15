@@ -56,8 +56,7 @@ def test_registry_validate_params_catches_missing_required(registry: Registry):
 
 def test_registry_validate_params_catches_multiple_missing(registry: Registry):
     errors = registry.validate_params("regex_match", {})
-    missing = {e for e in errors}
-    assert len(missing) == 2
+    assert len(set(errors)) == 2
 
 
 def test_registry_validate_params_catches_unknown_param(registry: Registry):

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from dq_agent.engine import run
 from dq_agent.models import Contract, ContractRule
 from dq_agent.report import render
 
@@ -17,8 +18,6 @@ def _contract(*rules: ContractRule) -> Contract:
 
 def test_render_header_contains_dataset_and_run_time(registry, orders_df):
     contract = _contract(ContractRule(rule_id="null_check", params={"column": "order_id"}))
-    from dq_agent.engine import run
-
     results = run(contract, orders_df, registry)
     report = render(results, contract, registry, run_at=RUN_AT)
 
@@ -33,8 +32,6 @@ def test_render_empty_contract(registry, orders_df):
 
 
 def test_render_all_passed_summary(registry, orders_df):
-    from dq_agent.engine import run
-
     contract = _contract(
         ContractRule(rule_id="null_check", params={"column": "order_id"}),
         ContractRule(rule_id="unique_check", params={"column": "email"}),
@@ -48,8 +45,6 @@ def test_render_all_passed_summary(registry, orders_df):
 
 
 def test_render_all_failed_summary(registry, orders_df):
-    from dq_agent.engine import run
-
     contract = _contract(
         ContractRule(rule_id="null_check", params={"column": "customer_id", "max_null_rate": 0.0}),
         ContractRule(rule_id="unique_check", params={"column": "order_id"}),
@@ -63,8 +58,6 @@ def test_render_all_failed_summary(registry, orders_df):
 
 
 def test_render_mixed_summary(registry, orders_df):
-    from dq_agent.engine import run
-
     contract = _contract(
         ContractRule(rule_id="null_check", params={"column": "order_id"}),         # passes
         ContractRule(rule_id="null_check", params={"column": "customer_id"}),       # fails
@@ -78,8 +71,6 @@ def test_render_mixed_summary(registry, orders_df):
 
 
 def test_render_shows_rule_name_not_id(registry, orders_df):
-    from dq_agent.engine import run
-
     contract = _contract(ContractRule(rule_id="null_check", params={"column": "order_id"}))
     results = run(contract, orders_df, registry)
     report = render(results, contract, registry, run_at=RUN_AT)
@@ -89,8 +80,6 @@ def test_render_shows_rule_name_not_id(registry, orders_df):
 
 
 def test_render_shows_column_in_context(registry, orders_df):
-    from dq_agent.engine import run
-
     contract = _contract(ContractRule(rule_id="null_check", params={"column": "customer_id"}))
     results = run(contract, orders_df, registry)
     report = render(results, contract, registry, run_at=RUN_AT)
@@ -99,7 +88,6 @@ def test_render_shows_column_in_context(registry, orders_df):
 
 
 def test_render_shows_violation_rate(registry, orders_df):
-    from dq_agent.engine import run
     from tests.conftest import NULL_CUSTOMER_IDS, TOTAL_ROWS
 
     contract = _contract(
@@ -113,8 +101,6 @@ def test_render_shows_violation_rate(registry, orders_df):
 
 
 def test_render_shows_error_message(registry, orders_df):
-    from dq_agent.engine import run
-
     contract = _contract(ContractRule(rule_id="null_check", params={}))  # missing column
     results = run(contract, orders_df, registry)
     report = render(results, contract, registry, run_at=RUN_AT)
@@ -124,8 +110,6 @@ def test_render_shows_error_message(registry, orders_df):
 
 def test_render_warning_severity_tag_shown(registry, orders_df):
     """warning severity is shown explicitly — it signals the rule is advisory, not blocking."""
-    from dq_agent.engine import run
-
     contract = _contract(
         ContractRule(rule_id="null_check", params={"column": "customer_id"}, severity="warning")
     )
@@ -137,8 +121,6 @@ def test_render_warning_severity_tag_shown(registry, orders_df):
 
 def test_render_error_severity_not_tagged(registry, orders_df):
     """error is the default severity and adds no tag — failures are critical by default."""
-    from dq_agent.engine import run
-
     contract = _contract(
         ContractRule(rule_id="null_check", params={"column": "customer_id"})
     )
@@ -149,8 +131,6 @@ def test_render_error_severity_not_tagged(registry, orders_df):
 
 
 def test_render_min_row_count_shows_threshold_not_column(registry, orders_df):
-    from dq_agent.engine import run
-
     contract = _contract(ContractRule(rule_id="min_row_count", params={"min_rows": 5}))
     results = run(contract, orders_df, registry)
     report = render(results, contract, registry, run_at=RUN_AT)
@@ -160,8 +140,6 @@ def test_render_min_row_count_shows_threshold_not_column(registry, orders_df):
 
 def test_render_example_contract_full_run(registry, orders_df):
     """Smoke test: the example contract renders without errors and covers all known issues."""
-    from dq_agent.engine import run
-
     path = Path(__file__).parent.parent / "contracts" / "examples" / "orders.yaml"
     contract = Contract.from_yaml(path)
     results = run(contract, orders_df, registry)
