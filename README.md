@@ -279,8 +279,8 @@ description: Fails if the null rate in a column exceeds max_null_rate.
 tags: [completeness]
 severity: error
 parameters:
-  column:        {type: str, required: true}
-  max_null_rate: {type: float, default: 0.0}
+  column: { type: str, required: true }
+  max_null_rate: { type: float, default: 0.0 }
 execution:
   module: dq_agent.rules.completeness
   function: null_check
@@ -308,7 +308,7 @@ chosen during scoping:
 
 ```yaml
 - rule_id: null_check
-  params: {column: customer_id, max_null_rate: 0.0}
+  params: { column: customer_id, max_null_rate: 0.0 }
 ```
 
 For each contract entry the engine validates params against the spec, resolves the
@@ -325,12 +325,12 @@ Authoring standards live in `.claude/roles/rule-author.md`.
 
 See [ACTION_PLAN.md](ACTION_PLAN.md) for the full roadmap.
 
-| Phase | Focus                                   | Status  |
-| ----- | --------------------------------------- | ------- |
-| 1     | Rule registry + execution engine        | done    |
-| 2     | Deterministic profiler (CSV + Postgres) | done    |
+| Phase | Focus                                   | Status      |
+| ----- | --------------------------------------- | ----------- |
+| 1     | Rule registry + execution engine        | done        |
+| 2     | Deterministic profiler (CSV + Postgres) | done        |
 | 3     | Scoping agent with human approval gate  | in progress |
-| 4     | Creative mode — novel rule proposals    | planned |
+| 4     | Creative mode — novel rule proposals    | planned     |
 
 ---
 
