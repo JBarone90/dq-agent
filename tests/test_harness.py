@@ -171,47 +171,149 @@ def test_recall_and_precision_values(orders_df, registry):
 
 
 # ---------------------------------------------------------------------------
-# Integration test — live LLM, skipped by default
+# Integration tests — live LLM, skipped by default
+#
+# Two complementary tests exercise the same system prompt and model at different
+# difficulty levels:
+#
+#   explicit  — the user front-loads every rule, column, and parameter. Tests
+#               that the agent correctly translates clear instructions into a
+#               valid contract. A failure here points to a tool-schema or
+#               registry problem, not a prompt problem.
+#
+#   discovery — the user gives only a brief business description and lets the
+#               agent reason from the profile. Tests that the system prompt
+#               actually guides the agent to find issues on its own. A failure
+#               here points to the system prompt or model capability.
+#
+# Both tests run against the same ORDERS_EXPECTED_FAILURES ground truth and
+# assert recall == 1.0, so any prompt or model change that silently degrades
+# coverage is caught by at least one of them.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.integration
-def test_scoping_agent_achieves_full_recall_on_orders(
-    synthetic_data_path, orders_df, registry, tmp_path
-):
-    """The real scoping agent must catch every known issue in orders.csv.
+def _print_conversation(messages) -> None:
+    """Print the full agent interaction trace to stdout (visible with pytest -s)."""
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-    Run with:
-        DQ_AGENT_MODEL=google_genai:gemini-2.5-flash uv run pytest -m integration -v
+    print("\n" + "=" * 60)
+    print("AGENT INTERACTION TRACE")
+    print("=" * 60)
+    for msg in messages:
+        if isinstance(msg, SystemMessage):
+            # system prompt is injected per-turn, not stored in state — skip
+            continue
+        elif isinstance(msg, HumanMessage):
+            print(f"\n[HUMAN]\n{msg.content}")
+        elif isinstance(msg, AIMessage):
+            if msg.content:
+                print(f"\n[AGENT]\n{msg.content}")
+            for tc in getattr(msg, "tool_calls", []):
+                args_preview = str(tc["args"])[:200]
+                print(f"\n[AGENT → TOOL] {tc['name']}({args_preview})")
+        elif isinstance(msg, ToolMessage):
+            preview = msg.content[:300] if msg.content else "(empty)"
+            print(f"\n[TOOL RESULT]\n{preview}")
+        else:
+            print(f"\n[{type(msg).__name__}]\n{msg.content}")
+    print("\n" + "=" * 60)
 
-    Failure output lists exactly which issues were missed so you know whether to
-    fix the system prompt, the registry, or both.
-    """
+
+def _run_scoping_session(
+    graph,
+    config: dict,
+    csv_path: str,
+    first_message: str,
+    nudge_message: str,
+    max_turns: int = 5,
+) -> dict:
+    """Drive the graph forward until a draft appears or the approval interrupt fires.
+
+    Returns the final result dict. Raises pytest.fail if no draft is produced
+    within max_turns. Always prints the full interaction trace."""
+    from langchain_core.messages import HumanMessage
+
+    result = graph.invoke({"messages": [HumanMessage(first_message)]}, config)
+
+    for _ in range(max_turns):
+        if result.get("draft") or result.get("__interrupt__"):
+            break
+        result = graph.invoke({"messages": [HumanMessage(nudge_message)]}, config)
+
+    _print_conversation(result["messages"])
+
+    if not result.get("draft") and not result.get("__interrupt__"):
+        last = result["messages"][-1].content if result.get("messages") else "(no messages)"
+        pytest.fail(
+            f"agent did not produce a draft after {max_turns} turns.\n"
+            f"Last agent message: {last[:500]}"
+        )
+
+    return result
+
+
+def _score_and_assert(result, orders_df, registry, label: str) -> None:
+    from datetime import datetime, timezone
+    from dq_agent.models import Contract
+
+    draft = result.get("draft")
+    if draft is None:
+        pytest.fail(f"[{label}] no draft in state after session completed")
+
+    contract = Contract.model_validate(draft)
+    contract.approved_at = datetime.now(timezone.utc)  # allow engine to run without approval gate
+
+    score = score_contract(contract, orders_df, registry, ORDERS_EXPECTED_FAILURES)
+
+    print(f"\n[{label}] recall={score.recall:.2f}  precision={score.precision:.2f}")
+    print(f"  caught:   {score.caught}")
+    print(f"  missed:   {score.missed}")
+    print(f"  spurious: {score.spurious}")
+
+    assert score.recall == 1.0, (
+        f"[{label}] agent missed {len(score.missed)} known issue(s): {score.missed}\n"
+        f"caught:   {score.caught}\n"
+        f"spurious: {score.spurious}"
+    )
+
+
+def _integration_graph(registry, tmp_path):
+    pytest.importorskip("langgraph")
+
     import os
-
     if not os.environ.get("DQ_AGENT_MODEL"):
         pytest.skip("DQ_AGENT_MODEL not set — see module docstring for instructions")
 
-    pytest.importorskip("langgraph")
-
-    from datetime import datetime, timezone
-
-    from langchain_core.messages import HumanMessage
     from langgraph.checkpoint.memory import InMemorySaver
-
     from dq_agent.agents.scoping import build_graph
-    from dq_agent.models import Contract
 
-    graph = build_graph(
+    return build_graph(
         registry=registry,
         contracts_dir=tmp_path,
         checkpointer=InMemorySaver(),
     )
-    config = {"configurable": {"thread_id": "integration-orders"}}
+
+
+@pytest.mark.integration
+def test_scoping_agent_explicit_instructions(
+    synthetic_data_path, orders_df, registry, tmp_path
+):
+    """Agent follows detailed, explicit user requirements and achieves full recall.
+
+    The user front-loads every rule, column, and parameter. A failure here points
+    to a tool-schema or registry problem, not a system-prompt problem.
+
+    Run with:
+        DQ_AGENT_MODEL=google_genai:gemini-2.5-flash uv run pytest -m integration -s -v
+    """
+    graph = _integration_graph(registry, tmp_path)
     csv_path = str(synthetic_data_path / "orders.csv")
 
-    result = graph.invoke(
-        {"messages": [HumanMessage(
+    result = _run_scoping_session(
+        graph,
+        config={"configurable": {"thread_id": "integration-explicit"}},
+        csv_path=csv_path,
+        first_message=(
             f"I need to scope {csv_path} for data quality. "
             "Business context: this is our e-commerce orders table. Each row is a customer "
             "order with an ID, customer reference, purchase amount, email, status, creation "
@@ -224,39 +326,43 @@ def test_scoping_agent_achieves_full_recall_on_orders(
             "created_at must be no older than 365 days (use 2026-06-12 as the reference date). "
             "Please profile the dataset, propose a contract covering all of these, and "
             "request approval immediately once you have a proposal."
-        )]},
-        config,
+        ),
+        nudge_message=(
+            "I have given you all the context you need. Please proceed and propose "
+            "the contract now."
+        ),
     )
+    _score_and_assert(result, orders_df, registry, label="explicit")
 
-    # The agent is conversational and may ask a clarifying question before proposing.
-    # Nudge it forward up to MAX_TURNS times until a draft appears or the approval
-    # interrupt fires.
-    MAX_TURNS = 5
-    for _ in range(MAX_TURNS):
-        if result.get("draft") or result.get("__interrupt__"):
-            break
-        result = graph.invoke(
-            {"messages": [HumanMessage(
-                "I have given you all the context you need. Please proceed and propose "
-                "the contract now."
-            )]},
-            config,
-        )
 
-    draft = result.get("draft")
-    if draft is None:
-        last_msg = result["messages"][-1].content if result.get("messages") else "(no messages)"
-        pytest.fail(
-            f"agent did not produce a draft after {MAX_TURNS} turns.\n"
-            f"Last agent message: {last_msg[:500]}"
-        )
+@pytest.mark.integration
+def test_scoping_agent_discovers_issues_from_profile(
+    synthetic_data_path, orders_df, registry, tmp_path
+):
+    """Agent discovers data quality issues from the profile with minimal user guidance.
 
-    contract = Contract.model_validate(draft)
-    contract.approved_at = datetime.now(timezone.utc)  # allow engine to run
+    The user provides only a brief business description — no rules, no columns, no
+    parameters. The agent must read the profile statistics and reason about what
+    checks make sense. A failure here points to the system prompt or model capability.
 
-    score = score_contract(contract, orders_df, registry, ORDERS_EXPECTED_FAILURES)
-    assert score.recall == 1.0, (
-        f"agent missed {len(score.missed)} known issue(s): {score.missed}\n"
-        f"caught:   {score.caught}\n"
-        f"spurious: {score.spurious}"
+    Run with:
+        DQ_AGENT_MODEL=google_genai:gemini-2.5-flash uv run pytest -m integration -s -v
+    """
+    graph = _integration_graph(registry, tmp_path)
+    csv_path = str(synthetic_data_path / "orders.csv")
+
+    result = _run_scoping_session(
+        graph,
+        config={"configurable": {"thread_id": "integration-discovery"}},
+        csv_path=csv_path,
+        first_message=(
+            f"I need to scope {csv_path} for data quality. "
+            "It's our e-commerce orders table — each row is a customer purchase. "
+            "Please profile it and propose whatever checks make sense given what you find."
+        ),
+        nudge_message=(
+            "Please use your best judgment from the profile and propose a contract now. "
+            "Don't wait for more input from me."
+        ),
     )
+    _score_and_assert(result, orders_df, registry, label="discovery")
