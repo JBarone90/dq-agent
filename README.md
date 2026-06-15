@@ -301,9 +301,9 @@ def null_check(df: pl.DataFrame, *, column: str, max_null_rate: float = 0.0) -> 
 ```
 
 The registry connects the two at startup: it loads every YAML, indexes rules by id
-and tags, and resolves `execution.module` / `execution.function` to the callable on
-first use. The engine never imports rule modules directly — all routing goes through
-the registry. A contract then activates a rule for one dataset by id, with parameters
+(exposing their tags for the scoping agent to filter on), and resolves
+`execution.module` / `execution.function` to the callable on first use. The engine
+never imports rule modules directly — all routing goes through the registry. A contract then activates a rule for one dataset by id, with parameters
 chosen during scoping:
 
 ```yaml
