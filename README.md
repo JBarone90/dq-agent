@@ -1,8 +1,7 @@
 # dq-agent
 
-[![tests](https://github.com/OWNER/dq-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/OWNER/dq-agent/actions/workflows/tests.yml)
+[![tests](https://github.com/JBarone90/dq-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/JBarone90/dq-agent/actions/workflows/tests.yml)
 
-<!-- Replace OWNER above with your GitHub username/org once the repo is pushed. -->
 
 **dq-agent is a Python toolkit for defining and running data-quality checks on a dataset.** You point it at your data and describe its business context; it profiles the data and helps you assemble a **contract** — a list of quality rules with parameters. You approve the contract once, and from then on it runs **deterministically** on every pipeline run, returning pass/fail per rule.
 
