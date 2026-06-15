@@ -35,3 +35,6 @@ packages = ["src/dq_agent"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: live LLM call — requires DQ_AGENT_MODEL env var (deselected by default)",
+]
