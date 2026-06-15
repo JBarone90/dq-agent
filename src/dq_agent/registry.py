@@ -53,6 +53,10 @@ class Registry:
             with path.open() as f:
                 data = yaml.safe_load(f)
             rule = RuleDefinition.model_validate(data)
+            if rule.id in self._rules:
+                raise ValueError(
+                    f"duplicate rule id '{rule.id}' (second definition in {path.name})"
+                )
             self._rules[rule.id] = rule
 
     def get(self, rule_id: str) -> RuleDefinition:
