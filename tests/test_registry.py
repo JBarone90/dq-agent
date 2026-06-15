@@ -71,6 +71,23 @@ def test_registry_validate_params_optional_not_required(registry: Registry):
     assert errors == []
 
 
+def test_registry_validate_params_catches_type_mismatch(registry: Registry):
+    # max_null_rate is a float; a string must be rejected at validation, not at call time
+    errors = registry.validate_params("null_check", {"column": "x", "max_null_rate": "high"})
+    assert any("max_null_rate" in e and "float" in e for e in errors)
+
+
+def test_registry_validate_params_whole_number_is_valid_float(registry: Registry):
+    # lenient: a whole number is a valid float
+    errors = registry.validate_params("null_check", {"column": "x", "max_null_rate": 1})
+    assert errors == []
+
+
+def test_registry_validate_params_catches_non_list(registry: Registry):
+    errors = registry.validate_params("allowed_values", {"column": "s", "values": "shipped"})
+    assert any("values" in e and "list" in e for e in errors)
+
+
 # Minimal valid params per rule, used to smoke-call every registered rule.
 # If a new rule YAML is added without an entry here, the drift test fails loudly.
 MINIMAL_PARAMS = {

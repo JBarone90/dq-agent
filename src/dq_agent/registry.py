@@ -12,6 +12,7 @@ time the engine uses it to validate params and route rule_ids to callables.
 
 from __future__ import annotations
 
+import datetime
 import importlib
 from pathlib import Path
 from typing import Any, Callable
@@ -75,8 +76,46 @@ class Registry:
                 errors.append(f"rule '{rule_id}': missing required param '{name}'")
         for name in sorted(set(params) - set(rule.parameters)):
             errors.append(f"rule '{rule_id}': unknown param '{name}'")
+        for name, value in params.items():
+            spec = rule.parameters.get(name)
+            # None means "use the default"; unknown params are already reported above
+            if spec is None or value is None:
+                continue
+            if not _type_matches(spec.type, value):
+                errors.append(
+                    f"rule '{rule_id}': param '{name}' must be {spec.type}, "
+                    f"got {type(value).__name__}"
+                )
         return errors
 
     @property
     def rule_ids(self) -> list[str]:
         return list(self._rules.keys())
+
+
+def _type_matches(type_name: str, value: Any) -> bool:
+    if type_name == "str":
+        return isinstance(value, str)
+    if type_name == "int":
+        # bool is a subclass of int — a flag is not a count
+        return isinstance(value, int) and not isinstance(value, bool)
+    if type_name == "float":
+        # lenient: a whole number is a valid float (5 is a fine max_days, 0 a fine rate)
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if type_name == "list":
+        return isinstance(value, list)
+    if type_name == "date":
+        return _is_date_like(value)
+    return True  # unrecognised type spec: don't block, it's documentation only
+
+
+def _is_date_like(value: Any) -> bool:
+    if isinstance(value, (datetime.date, datetime.datetime)):
+        return True
+    if isinstance(value, str):
+        try:
+            datetime.date.fromisoformat(value)
+            return True
+        except ValueError:
+            return False
+    return False
