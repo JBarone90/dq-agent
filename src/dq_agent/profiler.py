@@ -102,7 +102,10 @@ def profile(
 
 
 def redact(report: ProfileReport) -> ProfileReport:
-    """Return a copy safe for LLM consumption: no raw cell value examples."""
+    """Return a copy safe for LLM consumption: raw cell value *examples* (top_values)
+    are dropped. Bounded aggregates — null rate, uniqueness, and numeric/temporal
+    min/max and quantiles — are retained. min/max are real extreme values, disclosed
+    deliberately as aggregates (they drive range proposals), not as value listings."""
     clone = report.model_copy(deep=True)
     clone.redacted = True
     for column in clone.columns:

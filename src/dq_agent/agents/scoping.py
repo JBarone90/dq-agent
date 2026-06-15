@@ -60,7 +60,8 @@ def _make_tools(registry: Registry) -> list:
     ) -> Command:
         """Profile a local CSV or Parquet dataset. Returns a redacted statistical
         report: column types, null rates, uniqueness, distributions, semantic hints.
-        Contains no raw cell values."""
+        Raw value examples (top values) are stripped; numeric/temporal min and max are
+        disclosed as bounded aggregates."""
         file = Path(path)
         if not file.exists():
             return Command(update={"messages": [
