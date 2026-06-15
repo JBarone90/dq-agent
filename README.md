@@ -32,7 +32,6 @@ The deterministic core (engine, profiler, registry, report) is complete and cove
 - [Quickstart](#quickstart)
 - [The scoping agent](#the-scoping-agent)
 - [Project structure](#project-structure)
-- [Development & testing](#development--testing)
 
 ### Concepts
 
@@ -41,6 +40,7 @@ The deterministic core (engine, profiler, registry, report) is complete and cove
 
 ### For developers
 
+- [Development & testing](#development--testing)
 - [Anatomy of a rule](#anatomy-of-a-rule)
 - [Design principles](#design-principles)
 
@@ -190,41 +190,6 @@ dq-agent/
 
 **Polars is the internal representation.** Connectors load into a Polars DataFrame before any profiling or rule execution runs — raw DB cursors and pandas frames never reach the engine.
 
-## Development & testing
-
-Install the optional dependency groups you need:
-
-| Command                    | Adds                                                    |
-| -------------------------- | ------------------------------------------------------- |
-| `uv sync`                  | core: Polars, Pydantic, PyYAML                          |
-| `uv sync --extra dev`      | pytest, pytest-cov                                      |
-| `uv sync --extra postgres` | ConnectorX (Postgres connector)                         |
-| `uv sync --extra agents`   | LangGraph + LangChain (the scoping agent + chat server) |
-
-Run the suite:
-
-```bash
-uv run pytest                                          # all tests
-uv run pytest tests/test_engine.py::test_run_passes_on_clean_column   # a single test
-uv run pytest --cov=src/dq_agent                       # with coverage
-```
-
-Integration tests (which make live LLM calls) are marked `integration` and are deselected in CI; they self-skip locally unless `DQ_AGENT_MODEL` is set. The Postgres test (identical profiler report from a file and a live table) skips unless `DQ_TEST_POSTGRES_URI` is set. To run it against a throwaway container:
-
-```bash
-docker run -d --name dq-test-pg -e POSTGRES_PASSWORD=dq -p 5433:5432 postgres:16
-docker exec dq-test-pg psql -U postgres -c "CREATE TABLE orders (
-  order_id INTEGER, customer_id TEXT, email TEXT, amount DOUBLE PRECISION,
-  status TEXT, created_at DATE, phone TEXT);"
-cat data/synthetic/orders.csv | docker exec -i dq-test-pg psql -U postgres \
-  -c "\copy orders FROM STDIN WITH (FORMAT csv, HEADER true)"
-
-DQ_TEST_POSTGRES_URI=postgresql://postgres:dq@localhost:5433/postgres uv run pytest
-docker rm -f dq-test-pg
-```
-
-**CI** runs the suite on push to `main` and on every pull request, across Python 3.11–3.13 (`.github/workflows/tests.yml`).
-
 ## Concepts
 
 The toolkit is two layers. The **data-quality layer** defines and runs checks with no LLM involved — it works entirely on its own. The **scoping layer** sits on top and is how an LLM helps a human author a contract for that lower layer to run.
@@ -317,6 +282,41 @@ Redaction is enforced in the agent's tooling: the `profile_dataset` tool always 
 **Regression-testing the scoping agent.** The harness (`harness.py`) scores a proposed contract against a hand-written set of expected failures, reporting **recall** (did it catch every known issue?) and **precision** (did it flag anything spurious?). It exists so that a change to the system prompt, model, or registry that silently reduces coverage of known dataset issues is caught by an assertion like `score.recall == 1.0`.
 
 ## For developers
+
+### Development & testing
+
+Install the optional dependency groups you need:
+
+| Command                    | Adds                                                    |
+| -------------------------- | ------------------------------------------------------- |
+| `uv sync`                  | core: Polars, Pydantic, PyYAML                          |
+| `uv sync --extra dev`      | pytest, pytest-cov                                      |
+| `uv sync --extra postgres` | ConnectorX (Postgres connector)                         |
+| `uv sync --extra agents`   | LangGraph + LangChain (the scoping agent + chat server) |
+
+Run the suite:
+
+```bash
+uv run pytest                                          # all tests
+uv run pytest tests/test_engine.py::test_run_passes_on_clean_column   # a single test
+uv run pytest --cov=src/dq_agent                       # with coverage
+```
+
+Integration tests (which make live LLM calls) are marked `integration` and are deselected in CI; they self-skip locally unless `DQ_AGENT_MODEL` is set. The Postgres test (identical profiler report from a file and a live table) skips unless `DQ_TEST_POSTGRES_URI` is set. To run it against a throwaway container:
+
+```bash
+docker run -d --name dq-test-pg -e POSTGRES_PASSWORD=dq -p 5433:5432 postgres:16
+docker exec dq-test-pg psql -U postgres -c "CREATE TABLE orders (
+  order_id INTEGER, customer_id TEXT, email TEXT, amount DOUBLE PRECISION,
+  status TEXT, created_at DATE, phone TEXT);"
+cat data/synthetic/orders.csv | docker exec -i dq-test-pg psql -U postgres \
+  -c "\copy orders FROM STDIN WITH (FORMAT csv, HEADER true)"
+
+DQ_TEST_POSTGRES_URI=postgresql://postgres:dq@localhost:5433/postgres uv run pytest
+docker rm -f dq-test-pg
+```
+
+**CI** runs the suite on push to `main` and on every pull request, across Python 3.11–3.13 (`.github/workflows/tests.yml`).
 
 ### Anatomy of a rule
 
