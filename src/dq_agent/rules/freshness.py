@@ -10,8 +10,10 @@ def freshness(
     *,
     column: str,
     max_days: int,
-    as_of: datetime.date | None = None,
+    as_of: datetime.date | str | None = None,
 ) -> RuleResult:
+    if isinstance(as_of, str):
+        as_of = datetime.date.fromisoformat(as_of)
     reference = as_of if as_of is not None else datetime.date.today()
     cutoff = reference - datetime.timedelta(days=max_days)
     violation_count = df.select(
