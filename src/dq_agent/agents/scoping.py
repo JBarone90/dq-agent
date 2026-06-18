@@ -38,7 +38,7 @@ from dq_agent.models import Contract, ContractRule
 from dq_agent.registry import Registry
 from dq_agent.report import describe_contract
 
-DEFAULT_MODEL = "google_genai:gemini-2.5-flash"
+DEFAULT_MODEL = "google_genai:gemini-3.1-flash-lite"
 DEFAULT_RULES_DIR = Path("registry/rules")
 DEFAULT_CONTRACTS_DIR = Path("contracts")
 

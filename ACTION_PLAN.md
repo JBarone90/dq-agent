@@ -246,7 +246,7 @@ an additive replacement — the graph and interrupt contract stay the same.
 | Package manager      | uv                 | Fast, reproducible                                                                   |
 | Orchestration        | LangGraph          | Native support for multi-agent + human-in-the-loop                                   |
 | LLM binding          | LangChain core     | Provider-agnostic interface                                                          |
-| Dev/demo LLM         | Gemini 2.5 Flash   | Free tier, solid tool calling; swap via `DQ_AGENT_MODEL` (Ollama for fully local)    |
+| Dev/demo LLM         | Gemini 3.1 Flash Lite | Free tier (high daily allowance), solid tool calling; swap via `DQ_AGENT_MODEL` (Ollama for fully local) |
 | Data layer           | Polars             | Fast, memory-efficient, clean API; consistent interface across CSV and DB connectors |
 | DB connector         | ConnectorX or ADBC | Polars-native Postgres ingestion                                                     |
 | Rule/contract format | YAML               | Human-readable, diffable, versionable                                                |

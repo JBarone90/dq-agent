@@ -119,7 +119,7 @@ The engine enforces the gate at run time: it raises `ContractNotApprovedError` f
 
 The chat UI is [agent-chat-ui](https://github.com/langchain-ai/agent-chat-ui) — LangChain's off-the-shelf client for LangGraph servers. Three steps:
 
-**1. Configure the model.** The dev default is Gemini 2.5 Flash on Google's free tier, whose LangChain package ships in the `agents` extra:
+**1. Configure the model.** The dev default is Gemini 3.1 Flash Lite on Google's free tier (chosen for its higher free-tier daily request allowance), whose LangChain package ships in the `agents` extra:
 
 ```bash
 uv sync --extra agents
@@ -132,7 +132,7 @@ Get a free key at [aistudio.google.com/apikey](https://aistudio.google.com/apike
 
 | Provider         | Add the package              | Set in `.env`                                                          |
 | ---------------- | ---------------------------- | ---------------------------------------------------------------------- |
-| Google (default) | _(bundled)_                  | `DQ_AGENT_MODEL=google_genai:gemini-2.5-flash` + `GOOGLE_API_KEY=...`  |
+| Google (default) | _(bundled)_                  | `DQ_AGENT_MODEL=google_genai:gemini-3.1-flash-lite` + `GOOGLE_API_KEY=...`  |
 | Anthropic        | `uv add langchain-anthropic` | `DQ_AGENT_MODEL=anthropic:claude-sonnet-4-6` + `ANTHROPIC_API_KEY=...` |
 | OpenAI           | `uv add langchain-openai`    | `DQ_AGENT_MODEL=openai:gpt-4o` + `OPENAI_API_KEY=...`                  |
 | Ollama (local)   | `uv add langchain-ollama`    | `DQ_AGENT_MODEL=ollama:qwen3:8b` _(no key)_                            |
@@ -161,7 +161,7 @@ pnpm install && pnpm dev   # then open http://localhost:3000 and enter the same 
 
 Then chat: point the agent at `data/synthetic/orders.csv`, describe the business context, and iterate on its proposal. When you confirm, the approval gate renders as an interrupt card (accept / edit / respond); accepting writes the approved contract to `contracts/<dataset>.yaml`.
 
-> **Free-tier rate limits:** a single scoping turn makes several model requests (the agent loop calls the model once per tool round), so Gemini's free-tier requests-per-minute cap is easy to hit mid-conversation. If you see 429s, wait a minute and continue (the thread keeps its state), or switch `DQ_AGENT_MODEL` to a model with a higher free RPM (e.g. `google_genai:gemini-2.5-flash-lite`).
+> **Free-tier rate limits:** a single scoping turn makes several model requests (the agent loop calls the model once per tool round), so Gemini's free-tier requests-per-minute cap is easy to hit mid-conversation. The default `gemini-3.1-flash-lite` is chosen partly for its higher free-tier allowance; if you still see 429s, wait a minute and continue (the thread keeps its state), or switch `DQ_AGENT_MODEL` to another model.
 
 The approval interrupt follows the agent-inbox `HumanInterrupt` schema, so agent-chat-ui renders the contract review (accept / edit / respond) natively.
 
