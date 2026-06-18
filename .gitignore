@@ -35,3 +35,8 @@ data/**/*.json
 # LangGraph dev server state
 .langgraph_api/
 !.env.example
+
+# Agent-persisted contracts — only hand-written examples are committed;
+# contracts the scoping agent approves at runtime are local artifacts
+/contracts/*.yaml
+!/contracts/examples/
