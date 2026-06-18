@@ -170,6 +170,7 @@ def test_graph_pauses_on_approval_interrupt(tmp_path, registry, synthetic_data_p
     action = request["action_requests"][0]
     assert action["name"] == "approve_contract"
     assert "null_check" in action["description"]
+    assert "```yaml" in action["description"]  # YAML fenced so markdown keeps indentation
     assert request["review_configs"][0]["allowed_decisions"] == ["approve", "edit", "reject"]
     assert not list(tmp_path.glob("*.yaml")), "nothing persists before approval"
 

@@ -246,9 +246,11 @@ def _approval_node(contracts_dir: Path, registry: Registry):
             return respond("error: no draft contract — call propose_contract first")
 
         contract = Contract.model_validate(draft)
+        # The UI markdown-renders this, so the YAML goes in a fenced block to keep its
+        # indentation; describe_contract already emits a markdown bullet list.
         description = ("Review the proposed data quality contract:\n\n"
                        + describe_contract(contract, registry)
-                       + "\n\nFull definition:\n\n" + contract.to_yaml())
+                       + "\n\nFull definition:\n\n```yaml\n" + contract.to_yaml() + "```")
         # agent-inbox HITL schema (agent-chat-ui main): isAgentInboxInterruptSchema only
         # accepts the plural action_requests + review_configs shape, so this renders as
         # approve/edit/reject controls instead of dumping raw JSON.

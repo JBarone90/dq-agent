@@ -70,10 +70,12 @@ def describe_contract(contract: Contract, registry: Registry) -> str:
     """Render a contract as a plain-English bullet list, one line per rule, for a
     non-technical owner to review at the approval gate. Falls back to the registry's
     rule name when a rule has no custom phrasing, so new rules degrade gracefully."""
+    # Markdown: a blank line after the header then "- " items renders as a real list.
+    # The agent-chat-ui approval card renders this description with a markdown component.
     lines = [f"Data quality contract for '{contract.dataset}' — {len(contract.rules)} "
              f"rule{'s' if len(contract.rules) != 1 else ''}:", ""]
     for rule in contract.rules:
-        lines.append("  • " + _describe_rule(rule, registry))
+        lines.append("- " + _describe_rule(rule, registry))
     return "\n".join(lines)
 
 

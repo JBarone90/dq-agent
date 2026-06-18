@@ -156,6 +156,19 @@ def test_describe_contract_single_rule_is_singular(registry):
     assert "1 rule:" in describe_contract(contract, registry)
 
 
+def test_describe_contract_uses_markdown_list(registry):
+    """The card renders as markdown — a literal bullet char collapses every item onto
+    one line, so items must use '- ' list markers."""
+    contract = _contract(
+        ContractRule(rule_id="unique_check", params={"column": "order_id"}),
+        ContractRule(rule_id="null_check", params={"column": "email"}),
+    )
+    summary = describe_contract(contract, registry)
+    assert "\n- `order_id` must be unique" in summary
+    assert "\n- `email` must never be empty" in summary
+    assert "•" not in summary
+
+
 def test_describe_contract_phrases_each_rule_type(registry):
     contract = _contract(
         ContractRule(rule_id="null_check", params={"column": "customer_id", "max_null_rate": 0.0}),
