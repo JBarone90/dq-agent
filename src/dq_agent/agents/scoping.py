@@ -118,7 +118,12 @@ def _make_tools(registry: Registry) -> list:
         """Propose a draft contract for the profiled dataset: the list of rule ids
         with parameters (and optional severity overrides) you recommend. The draft
         is validated against the registry and shown to the owner for discussion —
-        it is not approved or executed by this call."""
+        it is not approved or executed by this call.
+
+        Each rule's `params` must be a JSON object (dict), not a string. Example:
+          {"rule_id": "null_check", "params": {"column": "email"}}
+          {"rule_id": "range_check", "params": {"column": "amount", "min_val": 0}}
+        """
         report = state.get("profile")
         if report is None:
             return Command(update={"messages": [
@@ -149,8 +154,9 @@ def _make_tools(registry: Registry) -> list:
 
     @tool
     def request_approval() -> None:
-        """Send the current draft contract to the human approval gate. Call only
-        after the owner has explicitly confirmed the proposal in conversation."""
+        """Send the current draft contract to the human approval gate. Call this
+        immediately after propose_contract succeeds — do not wait for a conversational
+        confirmation first."""
         # never executed: the graph routes this call to the approval node
 
     return [profile_dataset, list_rules, propose_contract, request_approval]
