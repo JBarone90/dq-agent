@@ -53,6 +53,7 @@ before starting work in the corresponding area:
 | When you are...                                      | Load this role file              |
 | ---------------------------------------------------- | -------------------------------- |
 | Writing or editing files in `registry/rules/` or `src/dq_agent/rules/` | `.claude/roles/rule-author.md` |
+| Editing the scoping agent's approval gate / interrupt payloads, or debugging how the approval card renders in agent-chat-ui | `.claude/roles/agent-chat-ui.md` |
 
 ---
 

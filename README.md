@@ -111,7 +111,7 @@ For a formatted, human-readable version of this, pass the results to `report.ren
 
 ## The scoping agent
 
-Phase 3 wraps the scoping workflow in a single LangGraph agent (`src/dq_agent/agents/scoping.py`). It converses with the dataset owner, profiles the dataset (`profile_dataset` — redacted report only, no raw cell values ever reach the LLM), browses the registry (`list_rules`), and proposes a draft contract (`propose_contract`, validated against the registry). Approval is a LangGraph `interrupt()`: the graph pauses, a human accepts / edits / responds, and only an accepted contract is stamped (`approved_at`, `approved_by`), given a schema snapshot, and persisted to `contracts/<dataset>.yaml` — directly executable by the engine.
+Phase 3 wraps the scoping workflow in a single LangGraph agent (`src/dq_agent/agents/scoping.py`). It converses with the dataset owner, profiles the dataset (`profile_dataset` — redacted report only, no raw cell values ever reach the LLM), browses the registry (`list_rules`), and proposes a draft contract (`propose_contract`, validated against the registry). Approval is a LangGraph `interrupt()`: the graph pauses and presents a plain-English summary of the proposed rules (`report.describe_contract`) alongside the full YAML; a human approves / edits / rejects, and only an approved contract is stamped (`approved_at`, `approved_by`), given a schema snapshot, and persisted to `contracts/<dataset>.yaml` — directly executable by the engine.
 
 The engine enforces the gate at run time: it raises `ContractNotApprovedError` for unapproved contracts and `SchemaDriftError` when the live schema no longer matches the snapshot the contract was scoped against.
 
