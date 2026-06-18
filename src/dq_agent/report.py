@@ -1,15 +1,16 @@
-"""Deterministic renderer: list[RuleResult] → a human-readable quality report.
+"""Deterministic renderers that make the tool's artifacts legible to non-engineers.
 
-`render()` is the only entry point. It joins results with the contract (for params)
-and the registry (for rule names) so the output makes sense without engineering
-knowledge. No LLM involved — the report is a deterministic function of the results.
+`render()` turns engine results (list[RuleResult]) into a quality report;
+`describe_contract()` turns a contract into a plain-English rule summary for the
+scoping-time approval gate. Both join against the registry for human-readable rule
+names. No LLM involved — each is a deterministic function of its input.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from dq_agent.models import Contract, RuleResult
+from dq_agent.models import Contract, ContractRule, RuleResult
 from dq_agent.registry import Registry
 
 
@@ -63,6 +64,62 @@ def render(
             lines.append(_format_line(r, params_for.get(r.rule_id, {}), registry))
 
     return "\n".join(lines)
+
+
+def describe_contract(contract: Contract, registry: Registry) -> str:
+    """Render a contract as a plain-English bullet list, one line per rule, for a
+    non-technical owner to review at the approval gate. Falls back to the registry's
+    rule name when a rule has no custom phrasing, so new rules degrade gracefully."""
+    lines = [f"Data quality contract for '{contract.dataset}' — {len(contract.rules)} "
+             f"rule{'s' if len(contract.rules) != 1 else ''}:", ""]
+    for rule in contract.rules:
+        lines.append("  • " + _describe_rule(rule, registry))
+    return "\n".join(lines)
+
+
+def _describe_rule(rule: ContractRule, registry: Registry) -> str:
+    p = rule.params
+    col = p.get("column")
+    rid = rule.rule_id
+
+    if rid == "null_check":
+        rate = p.get("max_null_rate") or 0.0
+        text = (f"`{col}` must never be empty" if rate == 0
+                else f"`{col}` may be at most {rate * 100:.0f}% empty")
+    elif rid == "unique_check":
+        text = f"`{col}` must be unique — no duplicate values"
+    elif rid == "range_check":
+        text = f"`{col}` " + _range_clause(p)
+    elif rid == "allowed_values":
+        values = ", ".join(str(v) for v in p.get("values", []))
+        text = f"`{col}` must be one of: {values}"
+    elif rid == "regex_match":
+        text = f"`{col}` must match the expected text format"
+    elif rid == "freshness":
+        text = f"`{col}` must be no more than {p.get('max_days')} days old"
+    elif rid == "min_row_count":
+        text = f"the table must have at least {p.get('min_rows')} rows"
+    else:
+        try:
+            name = registry.get(rid).name
+        except KeyError:
+            name = rid
+        text = name + (f" on `{col}`" if col else "")
+
+    if rule.severity and rule.severity != "error":
+        text += f"  ({rule.severity})"
+    return text
+
+
+def _range_clause(params: dict) -> str:
+    lo, hi = params.get("min_val"), params.get("max_val")
+    if lo is not None and hi is not None:
+        return f"must be between {lo} and {hi}"
+    if lo is not None:
+        return f"must be at least {lo}"
+    if hi is not None:
+        return f"must be at most {hi}"
+    return "must be within the allowed range"
 
 
 def _format_line(result: RuleResult, params: dict, registry: Registry) -> str:

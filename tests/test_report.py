@@ -6,7 +6,7 @@ import yaml
 
 from dq_agent.engine import run
 from dq_agent.models import Contract, ContractRule
-from dq_agent.report import render
+from dq_agent.report import describe_contract, render
 
 RUN_AT = datetime(2026, 6, 15, 14, 32, tzinfo=timezone.utc)
 APPROVED_AT = datetime(2026, 6, 12, tzinfo=timezone.utc)
@@ -136,6 +136,75 @@ def test_render_min_row_count_shows_threshold_not_column(registry, orders_df):
     report = render(results, contract, registry, run_at=RUN_AT)
 
     assert "min 5 rows" in report
+
+
+# --- describe_contract: plain-English summary for the approval gate ------
+
+
+def test_describe_contract_header_counts_rules(registry):
+    contract = _contract(
+        ContractRule(rule_id="unique_check", params={"column": "order_id"}),
+        ContractRule(rule_id="null_check", params={"column": "email"}),
+    )
+    summary = describe_contract(contract, registry)
+    assert "orders" in summary
+    assert "2 rules" in summary
+
+
+def test_describe_contract_single_rule_is_singular(registry):
+    contract = _contract(ContractRule(rule_id="unique_check", params={"column": "order_id"}))
+    assert "1 rule:" in describe_contract(contract, registry)
+
+
+def test_describe_contract_phrases_each_rule_type(registry):
+    contract = _contract(
+        ContractRule(rule_id="null_check", params={"column": "customer_id", "max_null_rate": 0.0}),
+        ContractRule(rule_id="unique_check", params={"column": "order_id"}),
+        ContractRule(rule_id="range_check", params={"column": "amount", "min_val": 0}),
+        ContractRule(rule_id="allowed_values",
+                     params={"column": "status", "values": ["pending", "shipped"]}),
+        ContractRule(rule_id="regex_match", params={"column": "email", "pattern": "x"}),
+        ContractRule(rule_id="freshness", params={"column": "created_at", "max_days": 30}),
+        ContractRule(rule_id="min_row_count", params={"min_rows": 10}),
+    )
+    summary = describe_contract(contract, registry)
+
+    assert "`customer_id` must never be empty" in summary
+    assert "`order_id` must be unique" in summary
+    assert "`amount` must be at least 0" in summary
+    assert "`status` must be one of: pending, shipped" in summary
+    assert "`email` must match the expected text format" in summary
+    assert "`created_at` must be no more than 30 days old" in summary
+    assert "at least 10 rows" in summary
+    # the raw regex pattern is not exposed to a non-technical reviewer
+    assert "pattern" not in summary
+
+
+def test_describe_contract_null_check_with_tolerance(registry):
+    contract = _contract(
+        ContractRule(rule_id="null_check", params={"column": "phone", "max_null_rate": 0.1})
+    )
+    assert "`phone` may be at most 10% empty" in describe_contract(contract, registry)
+
+
+def test_describe_contract_range_between(registry):
+    contract = _contract(
+        ContractRule(rule_id="range_check", params={"column": "amount", "min_val": 0, "max_val": 500})
+    )
+    assert "must be between 0 and 500" in describe_contract(contract, registry)
+
+
+def test_describe_contract_shows_non_error_severity(registry):
+    contract = _contract(
+        ContractRule(rule_id="null_check", params={"column": "phone"}, severity="warning")
+    )
+    assert "(warning)" in describe_contract(contract, registry)
+
+
+def test_describe_contract_unknown_rule_falls_back_to_id(registry):
+    contract = _contract(ContractRule(rule_id="mystery_rule", params={"column": "x"}))
+    summary = describe_contract(contract, registry)
+    assert "mystery_rule on `x`" in summary
 
 
 def test_render_example_contract_full_run(registry, orders_df):

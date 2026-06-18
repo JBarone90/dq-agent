@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import getpass
+import json
 import os
 import re
 from datetime import datetime, timezone
@@ -30,10 +31,12 @@ from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import InjectedState, ToolNode
 from langgraph.types import Command, interrupt
+from pydantic import field_validator
 
 from dq_agent import connectors, profiler
 from dq_agent.models import Contract, ContractRule
 from dq_agent.registry import Registry
+from dq_agent.report import describe_contract
 
 DEFAULT_MODEL = "google_genai:gemini-2.5-flash"
 DEFAULT_RULES_DIR = Path("registry/rules")
@@ -51,6 +54,20 @@ class ScopingState(MessagesState):
 class ProposedRule(ContractRule):
     """A contract rule as proposed by the agent — same shape, separate name so the
     tool schema reads as a proposal, not an approved artifact."""
+
+    @field_validator("params", mode="before")
+    @classmethod
+    def _coerce_json_string(cls, value: Any) -> Any:
+        # Some models (smaller ones especially, e.g. the gemini *-flash-lite tier)
+        # serialize the nested params object as a JSON string instead of an object.
+        # Parse it here so the first tool call validates, rather than relying on the
+        # model to notice and retry.
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value  # let normal validation report the type error
+        return value
 
 
 def _make_tools(registry: Registry) -> list:
@@ -147,7 +164,8 @@ def _make_tools(registry: Registry) -> list:
         return Command(update={
             "draft": draft.model_dump(mode="json"),
             "messages": [ToolMessage(
-                "draft recorded — review it with the owner:\n" + draft.to_yaml(),
+                "draft recorded. Summarize it for the owner in plain English:\n"
+                + describe_contract(draft, registry),
                 tool_call_id=tool_call_id,
             )],
         })
@@ -212,7 +230,8 @@ def _approval_node(contracts_dir: Path, registry: Registry):
             "config": {"allow_accept": True, "allow_edit": True,
                        "allow_respond": True, "allow_ignore": False},
             "description": "Review the proposed data quality contract:\n\n"
-                           + contract.to_yaml(),
+                           + describe_contract(contract, registry)
+                           + "\n\nFull definition:\n\n" + contract.to_yaml(),
         }])
         if isinstance(response, list):
             response = response[0]

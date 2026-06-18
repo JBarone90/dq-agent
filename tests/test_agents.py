@@ -11,7 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
-from dq_agent.agents.scoping import _make_tools, build_graph
+from dq_agent.agents.scoping import ProposedRule, _make_tools, build_graph
 from dq_agent.engine import run
 from dq_agent.models import Contract
 
@@ -106,6 +106,35 @@ def test_propose_contract_records_unapproved_draft(tools, synthetic_data_path, o
     assert draft.rules[0].severity == "warning"
     # schema snapshot comes from the profile, so the engine's drift check will hold
     assert draft.columns == {name: str(dtype) for name, dtype in orders_df.schema.items()}
+
+
+# --- proposed rule param coercion ----------------------------------------
+
+
+def test_proposed_rule_coerces_json_string_params():
+    """Some models serialize params as a JSON string; the validator parses it so the
+    first tool call validates instead of needing a retry."""
+    rule = ProposedRule(rule_id="null_check", params='{"column": "email"}')
+    assert rule.params == {"column": "email"}
+
+
+def test_proposed_rule_keeps_dict_params_untouched():
+    rule = ProposedRule(rule_id="null_check", params={"column": "email"})
+    assert rule.params == {"column": "email"}
+
+
+def test_propose_contract_accepts_string_params(tools, synthetic_data_path):
+    """End to end through the tool: string params no longer fail validation."""
+    profiled = tools["profile_dataset"].invoke(
+        _tool_call("profile_dataset", {"path": str(synthetic_data_path / "orders.csv")})
+    )
+    command = tools["propose_contract"].invoke(_tool_call(
+        "propose_contract",
+        {"rules": [{"rule_id": "unique_check", "params": '{"column": "order_id"}'}],
+         "state": {"profile": profiled.update["profile"]}},
+    ))
+    draft = Contract.model_validate(command.update["draft"])
+    assert draft.rules[0].params == {"column": "order_id"}
 
 
 # --- graph: approval gate ------------------------------------------------
