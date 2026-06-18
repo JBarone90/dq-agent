@@ -150,6 +150,16 @@ _Novel rule proposals for patterns outside the registry._
 **Exit criteria:** agent surfaces at least one novel rule proposal during a scoping session on
 a dataset with an unusual pattern; proposal file is readable and actionable by a developer.
 
+### Deferred — Registry-driven contract summaries
+
+`report.describe_contract()` renders a contract as plain English for the approval gate, but it does so with a per-`rule_id` `if/elif` chain. That couples the renderer to the rule catalogue: adding a rule to `registry/rules/` requires editing `report.py` to phrase it well, which cuts against the registry invariant ("adding a rule is just YAML + a function, never a core-code change"). It degrades gracefully today (unknown rules fall back to the registry name), so this is a scalability cleanup, not a bug.
+
+- [ ] Move phrasing into the rule YAML as an optional `summary` template field (e.g. `` "`{column}` must never be empty" ``); `describe_contract` renders it generically via `str.format(**params)`, falling back to rule name + params when absent. New rules then ship their own description with no `report.py` edit.
+- [ ] Decide how to handle the few rules whose phrasing is conditional on a value (`null_check` at `max_null_rate: 0` vs. > 0; `range_check` one bound vs. two) — either accept blunter unconditional wording or keep a tiny override map only for those.
+- [ ] Optional, creative-mode-adjacent: a small agent that *drafts* the `summary` template when a developer adds a rule, for human review before it is frozen as config. LLM at authoring time only.
+
+Explicitly out of scope: an LLM that translates the contract *at the approval gate* (runtime). The approval card is the surface a human reads to decide whether to approve, so it must faithfully represent the contract — a generated summary could drop a rule or misstate a threshold, and it adds nondeterminism, latency, and another redaction surface to a safety-critical gate. Keep the LLM at authoring time, never in the render/approval path.
+
 ---
 
 ## Test Dataset
