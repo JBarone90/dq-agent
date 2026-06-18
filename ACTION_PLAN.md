@@ -43,16 +43,16 @@ on top of them.
 
 _Foundation. Build and validate this before any LLM work._
 
-- [ ] Define rule schema: each rule has an ID, name, description, tags (domain, data type,
+- [x] Define rule schema: each rule has an ID, name, description, tags (domain, data type,
       severity), parameters, and an execution function
-- [ ] Implement a seed registry (10–15 rules): nullability, uniqueness, range checks,
+- [x] Implement a seed registry (10–15 rules): nullability, uniqueness, range checks,
       regex pattern matching, freshness, row count thresholds
       (referential integrity deferred — single-table scope, see Design Decisions)
-- [ ] Build the execution engine: given a dataset and a rule contract (list of rule IDs +
+- [x] Build the execution engine: given a dataset and a rule contract (list of rule IDs +
       parameters), run all rules and return a structured result
-- [ ] Define the result schema: rule ID, passed/failed, row-level detail, timestamp
-- [ ] Write unit tests for every rule and for the engine itself
-- [ ] Design registry as config-driven YAML so rules can be added without code changes
+- [x] Define the result schema: rule ID, passed/failed, row-level detail, timestamp
+- [x] Write unit tests for every rule and for the engine itself
+- [x] Design registry as config-driven YAML so rules can be added without code changes
       to the engine
 
 **Exit criteria:** given a dataset and a hand-written rule contract, the engine runs all rules
@@ -64,15 +64,15 @@ and produces correct, structured results with no LLM involved.
 
 _Produce the structured dataset summary the agent will reason over._
 
-- [ ] Column-level stats: null rate, uniqueness ratio, data type, min/max, top-N values,
+- [x] Column-level stats: null rate, uniqueness ratio, data type, min/max, top-N values,
       value distribution sketch
-- [ ] Table-level stats: row count, duplicate rows, schema fingerprint
-- [ ] Semantic hints: detect likely email, date, phone, ID columns by pattern
-- [ ] Output a structured profiler report (JSON) — this is the agent's primary input
-- [ ] Profiler must be backend-agnostic: Polars DataFrames as the internal representation;
+- [x] Table-level stats: row count, duplicate rows, schema fingerprint
+- [x] Semantic hints: detect likely email, date, phone, ID columns by pattern
+- [x] Output a structured profiler report (JSON) — this is the agent's primary input
+- [x] Profiler must be backend-agnostic: Polars DataFrames as the internal representation;
       data connectors load into Polars before profiling runs
-- [ ] Connectors in scope: local CSV/Parquet (development), Postgres (primary target)
-- [ ] Redacted report variant for LLM consumption: aggregates, types, null rates, and
+- [x] Connectors in scope: local CSV/Parquet (development), Postgres (primary target)
+- [x] Redacted report variant for LLM consumption: aggregates, types, null rates, and
       semantic hints only — no raw cell values (top-N examples excluded by default).
       Required even with an approved cloud tenant; see Design Decisions
 
@@ -108,7 +108,7 @@ _Single-agent first, sub-agent split only if it earns its complexity._
       property of the rule *in context*, not of the rule itself); the engine stamps the
       effective severity into each `RuleResult` so downstream consumers can act on a
       result alone — fail on `error`, log on `warning` — without re-joining the registry
-- [ ] Evaluation harness for the scoping agent: hand-write an "ideal contract" for each
+- [x] Evaluation harness for the scoping agent: hand-write an "ideal contract" for each
       synthetic dataset with documented issues, then score the agent's proposal against
       it (issues caught / missed / spurious rules). This is the regression suite for
       prompt, model, and registry changes — human approval validates one session,
@@ -119,7 +119,7 @@ _Single-agent first, sub-agent split only if it earns its complexity._
       against the live schema; on drift, route the owner back to re-scoping instead of
       failing rule-by-rule — the contract snapshots `columns` (name → dtype) at
       proposal time; `run()` raises `SchemaDriftError` naming what drifted
-- [ ] Human-readable run report: deterministic renderer from `list[RuleResult]` to a
+- [x] Human-readable run report: deterministic renderer from `list[RuleResult]` to a
       summary a non-technical dataset owner can read
 - [ ] Minimal web UI as localhost demo: use [agent-chat-ui](https://github.com/langchain-ai/agent-chat-ui)
       instead of building a custom front end. It is LangChain's off-the-shelf chat client for
