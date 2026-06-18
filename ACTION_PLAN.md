@@ -98,7 +98,7 @@ _Single-agent first, sub-agent split only if it earns its complexity._
       covers this; promote to sub-agents only if complexity demands it
 - [x] Human approval gate: present proposed contract, user can accept, reject individual
       rules, or override parameters before finalizing — LangGraph `interrupt()` in the
-      `approval` node, agent-inbox `HumanInterrupt` schema (accept / edit / respond)
+      `approval` node, agent-chat-ui HITL schema (approve / edit / reject)
 - [x] Persist approved contract as a canonical YAML artifact independent of the agent
       — approval stamps `approved_at`/`approved_by` and writes `contracts/<dataset>.yaml`
 - [x] Enforce approval in the engine (deferred from Phase 1): `run()` refuses contracts
@@ -241,9 +241,9 @@ deferred until the demo proves the workflow and IT can be involved.
 **Interface implementation (2026-06-12).** The demo UI is agent-chat-ui rather than a
 custom build. Consequences for Phase 3 design: the scoping agent must be exposed as a
 LangGraph Server graph (`langgraph.json` + `langgraph dev`), and the human approval gate
-must be implemented as a LangGraph `interrupt()` whose payload follows the agent-inbox
-`HumanInterrupt` schema, so agent-chat-ui can render accept/edit/respond controls without
-custom front-end work. If the demo later needs a bespoke contract-review screen, that is
+must be implemented as a LangGraph `interrupt()` whose payload follows agent-chat-ui's
+HITL schema (`action_requests` + `review_configs`), so the UI can render approve/edit/reject
+controls without custom front-end work. If the demo later needs a bespoke contract-review screen, that is
 an additive replacement — the graph and interrupt contract stay the same.
 
 ---

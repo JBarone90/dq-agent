@@ -159,11 +159,11 @@ cd agent-chat-ui
 pnpm install && pnpm dev   # then open http://localhost:3000 and enter the same values
 ```
 
-Then chat: point the agent at `data/synthetic/orders.csv`, describe the business context, and iterate on its proposal. When you confirm, the approval gate renders as an interrupt card (accept / edit / respond); accepting writes the approved contract to `contracts/<dataset>.yaml`.
+Then chat: point the agent at `data/synthetic/orders.csv`, describe the business context, and iterate on its proposal. When you confirm, the approval gate renders as an interrupt card (approve / edit / reject); approving writes the approved contract to `contracts/<dataset>.yaml`.
 
 > **Free-tier rate limits:** a single scoping turn makes several model requests (the agent loop calls the model once per tool round), so Gemini's free-tier requests-per-minute cap is easy to hit mid-conversation. The default `gemini-3.1-flash-lite` is chosen partly for its higher free-tier allowance; if you still see 429s, wait a minute and continue (the thread keeps its state), or switch `DQ_AGENT_MODEL` to another model.
 
-The approval interrupt follows the agent-inbox `HumanInterrupt` schema, so agent-chat-ui renders the contract review (accept / edit / respond) natively.
+The approval interrupt follows agent-chat-ui's HITL schema (`action_requests` + `review_configs`, tracking the current agent-chat-ui `main`), so the UI renders the contract review (approve / edit / reject) natively instead of as raw JSON. If you connect a client still on the older `HumanInterrupt` schema and see the raw interrupt payload, type `approve` (or your feedback) as free text — the gate accepts a text response as well as the rendered controls.
 
 ## Project structure
 

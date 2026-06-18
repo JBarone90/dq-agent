@@ -4,8 +4,8 @@ A single LangGraph agent (sub-agent split deferred until it earns its complexity
 drives the scoping conversation: profile the dataset, discuss findings, query the
 registry, propose a parameterized rule suite, and route it through the human
 approval gate. The approval gate is a LangGraph `interrupt()` whose payload follows
-the agent-inbox `HumanInterrupt` schema, so agent-chat-ui renders accept/edit/respond
-controls without custom front-end work (see ACTION_PLAN.md, Interface implementation).
+agent-chat-ui's HITL schema (`action_requests` + `review_configs`), so the UI renders
+approve/edit/reject controls without custom front-end work (see ACTION_PLAN.md).
 
 The LLM never sees raw cell values (`profiler.redact()`) and never executes rules —
 its only product is a draft contract. Approval stamps `approved_at`/`approved_by` and
@@ -190,6 +190,28 @@ def _validate_rules(rules: list[ContractRule], registry: Registry) -> list[str]:
     return errors
 
 
+_ACCEPT_WORDS = {"accept", "approve", "approved", "yes", "y", "looks good", "go ahead"}
+
+
+def _decision(response: Any) -> dict[str, Any]:
+    """Normalize a resume payload into a single decision dict.
+
+    agent-chat-ui (main) resumes with {"decisions": [decision]} where decision["type"]
+    is approve/edit/reject; a bare list or dict is accepted too. A free-text string —
+    the raw-JSON fallback view, where the owner types instead of clicking — becomes an
+    approve or reject decision so the text and widget paths converge."""
+    if isinstance(response, dict) and "decisions" in response:
+        decisions = response["decisions"] or [{}]
+        response = decisions[0]
+    if isinstance(response, list):
+        response = response[0] if response else {}
+    if isinstance(response, str):
+        if response.strip().lower() in _ACCEPT_WORDS:
+            return {"type": "approve"}
+        return {"type": "reject", "message": response.strip()}
+    return response if isinstance(response, dict) else {}
+
+
 def _approver(args: dict[str, Any] | None) -> str:
     # localhost demo: single user, no auth — the OS user is the honest identity.
     # A deployed UI must supply approved_by in the interrupt response instead.
@@ -224,38 +246,39 @@ def _approval_node(contracts_dir: Path, registry: Registry):
             return respond("error: no draft contract — call propose_contract first")
 
         contract = Contract.model_validate(draft)
-        # agent-inbox HumanInterrupt schema: agent-chat-ui renders this natively
-        response = interrupt([{
-            "action_request": {"action": "approve_contract", "args": {"contract": draft}},
-            "config": {"allow_accept": True, "allow_edit": True,
-                       "allow_respond": True, "allow_ignore": False},
-            "description": "Review the proposed data quality contract:\n\n"
-                           + describe_contract(contract, registry)
-                           + "\n\nFull definition:\n\n" + contract.to_yaml(),
-        }])
-        if isinstance(response, list):
-            response = response[0]
-        kind, args = response.get("type"), response.get("args")
+        description = ("Review the proposed data quality contract:\n\n"
+                       + describe_contract(contract, registry)
+                       + "\n\nFull definition:\n\n" + contract.to_yaml())
+        # agent-inbox HITL schema (agent-chat-ui main): isAgentInboxInterruptSchema only
+        # accepts the plural action_requests + review_configs shape, so this renders as
+        # approve/edit/reject controls instead of dumping raw JSON.
+        response = interrupt({
+            "action_requests": [{
+                "name": "approve_contract",
+                "args": {"contract": draft},
+                "description": description,
+            }],
+            "review_configs": [{
+                "action_name": "approve_contract",
+                "allowed_decisions": ["approve", "edit", "reject"],
+            }],
+        })
+
+        decision = _decision(response)
+        kind = decision.get("type")
 
         if kind == "edit":
-            contract = Contract.model_validate(args["args"]["contract"])
+            edited = decision.get("edited_action") or {}
+            contract = Contract.model_validate(edited.get("args", {}).get("contract", {}))
             errors = _validate_rules(contract.rules, registry)
             if errors:
                 return respond("owner's edited contract is invalid, fix and re-propose: "
                                + "; ".join(errors))
-            kind = "accept"
+            kind = "approve"
 
-        # Text-based approval: agentchat.vercel.app shows the raw interrupt payload
-        # rather than rendering accept/edit/respond buttons, so the owner types their
-        # response as free text. Treat any clear affirmative as an accept.
-        _ACCEPT_WORDS = {"accept", "approve", "approved", "yes", "y", "looks good", "go ahead"}
-        if kind == "respond" and isinstance(args, str) and args.strip().lower() in _ACCEPT_WORDS:
-            kind = "accept"
-            args = None
-
-        if kind == "accept":
+        if kind == "approve":
             contract.approved_at = datetime.now(timezone.utc)
-            contract.approved_by = _approver(args if isinstance(args, dict) else None)
+            contract.approved_by = _approver(decision.get("args"))
             contracts_dir.mkdir(parents=True, exist_ok=True)
             filename = re.sub(r"[^A-Za-z0-9_-]", "_", contract.dataset) + ".yaml"
             path = contracts_dir / filename
@@ -266,9 +289,9 @@ def _approval_node(contracts_dir: Path, registry: Registry):
                 contract_path=str(path),
             )
 
-        # Free-text feedback that isn't an affirmative: pass it back to the agent
-        # so it can iterate on the contract rather than silently dropping the session.
-        return respond(f"owner did not approve; feedback: {args}")
+        # reject / anything non-affirmative: hand the feedback back to the agent so it
+        # can iterate on the contract rather than silently dropping the session.
+        return respond(f"owner did not approve; feedback: {decision.get('message')}")
 
     return approval
 

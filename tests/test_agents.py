@@ -166,9 +166,11 @@ def test_graph_pauses_on_approval_interrupt(tmp_path, registry, synthetic_data_p
     result = graph.invoke({"messages": [HumanMessage("scope orders.csv")]}, config)
 
     (intr,) = result["__interrupt__"]
-    request = intr.value[0]
-    assert request["action_request"]["action"] == "approve_contract"
-    assert "null_check" in request["description"]
+    request = intr.value
+    action = request["action_requests"][0]
+    assert action["name"] == "approve_contract"
+    assert "null_check" in action["description"]
+    assert request["review_configs"][0]["allowed_decisions"] == ["approve", "edit", "reject"]
     assert not list(tmp_path.glob("*.yaml")), "nothing persists before approval"
 
 
@@ -178,7 +180,7 @@ def test_accept_persists_approved_contract_the_engine_runs(
     monkeypatch.setenv("DQ_AGENT_APPROVER", "jacopo")
     graph, config = _scoping_graph(tmp_path, registry, synthetic_data_path, "approved!")
     graph.invoke({"messages": [HumanMessage("scope orders.csv")]}, config)
-    result = graph.invoke(Command(resume=[{"type": "accept", "args": None}]), config)
+    result = graph.invoke(Command(resume={"decisions": [{"type": "approve"}]}), config)
 
     assert result["messages"][-1].content == "approved!"
     contract = Contract.from_yaml(tmp_path / "orders.yaml")
@@ -191,13 +193,49 @@ def test_accept_persists_approved_contract_the_engine_runs(
     assert results[0].error is None
 
 
-def test_feedback_response_does_not_approve(tmp_path, registry, synthetic_data_path):
+def test_reject_decision_does_not_approve(tmp_path, registry, synthetic_data_path):
     graph, config = _scoping_graph(tmp_path, registry, synthetic_data_path, "ok, revising")
     graph.invoke({"messages": [HumanMessage("scope orders.csv")]}, config)
     result = graph.invoke(
-        Command(resume=[{"type": "response", "args": "loosen the null rate"}]), config
+        Command(resume={"decisions": [
+            {"type": "reject", "message": "loosen the null rate"}
+        ]}),
+        config,
     )
 
     assert not list(tmp_path.glob("*.yaml")), "feedback must not persist a contract"
     assert "loosen the null rate" in result["messages"][-2].content  # fed back to agent
     assert graph.get_state(config).values["draft"] is not None  # draft survives for iteration
+
+
+def test_edit_decision_persists_modified_contract(
+    tmp_path, registry, synthetic_data_path, monkeypatch
+):
+    """An edit decision carries the owner's modified contract in edited_action.args."""
+    monkeypatch.setenv("DQ_AGENT_APPROVER", "jacopo")
+    graph, config = _scoping_graph(tmp_path, registry, synthetic_data_path, "approved!")
+    graph.invoke({"messages": [HumanMessage("scope orders.csv")]}, config)
+
+    edited = graph.get_state(config).values["draft"]
+    edited["rules"][0]["params"]["max_null_rate"] = 0.0  # a valid tweak by the owner
+    graph.invoke(
+        Command(resume={"decisions": [{
+            "type": "edit",
+            "edited_action": {"name": "approve_contract", "args": {"contract": edited}},
+        }]}),
+        config,
+    )
+
+    contract = Contract.from_yaml(tmp_path / "orders.yaml")
+    assert contract.approved_at is not None
+    assert contract.rules[0].params["max_null_rate"] == 0.0
+
+
+def test_text_string_approve_persists(tmp_path, registry, synthetic_data_path, monkeypatch):
+    """Raw-JSON fallback view: the owner types 'approve' rather than clicking a button."""
+    monkeypatch.setenv("DQ_AGENT_APPROVER", "jacopo")
+    graph, config = _scoping_graph(tmp_path, registry, synthetic_data_path, "approved!")
+    graph.invoke({"messages": [HumanMessage("scope orders.csv")]}, config)
+    graph.invoke(Command(resume="approve"), config)
+
+    assert (tmp_path / "orders.yaml").exists()
