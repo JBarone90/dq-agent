@@ -220,6 +220,14 @@ def _approval_node(contracts_dir: Path, registry: Registry):
                                + "; ".join(errors))
             kind = "accept"
 
+        # Text-based approval: agentchat.vercel.app shows the raw interrupt payload
+        # rather than rendering accept/edit/respond buttons, so the owner types their
+        # response as free text. Treat any clear affirmative as an accept.
+        _ACCEPT_WORDS = {"accept", "approve", "approved", "yes", "y", "looks good", "go ahead"}
+        if kind == "respond" and isinstance(args, str) and args.strip().lower() in _ACCEPT_WORDS:
+            kind = "accept"
+            args = None
+
         if kind == "accept":
             contract.approved_at = datetime.now(timezone.utc)
             contract.approved_by = _approver(args if isinstance(args, dict) else None)
@@ -233,7 +241,8 @@ def _approval_node(contracts_dir: Path, registry: Registry):
                 contract_path=str(path),
             )
 
-        # "response" (free-text feedback) and anything unrecognized: no approval
+        # Free-text feedback that isn't an affirmative: pass it back to the agent
+        # so it can iterate on the contract rather than silently dropping the session.
         return respond(f"owner did not approve; feedback: {args}")
 
     return approval
