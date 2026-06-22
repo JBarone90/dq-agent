@@ -37,12 +37,16 @@ def rule_name(df: pl.DataFrame, *, column: str, **kwargs) -> RuleResult:
 
 - `rule_id`: copy from the YAML `id`, hardcoded per function
 - `passed`: bool — the single verdict
-- `violation_rate`: fraction of rows that violated the rule (0.0–1.0) — rules always populate
-  this with a measured value. `None` is reserved for the engine's error results (rule never
-  evaluated); a rule function must never return it. Table-level rules define their own
-  0.0–1.0 semantics and document them in the YAML description (e.g. `min_row_count` reports
-  the shortfall as a fraction of the threshold)
-- `error`: populate only when the rule cannot run due to misconfiguration; set `passed=False`
+- `violation_rate`: fraction of rows that violated the rule (0.0–1.0) — a rule that
+  evaluates the data always populates this with a measured value, where `0.0` means
+  measured clean. `None` means the rule was never evaluated and is the exact complement of
+  `error`: set both together (`violation_rate=None` whenever `error` is set, a real rate
+  whenever it is not). Do not return `0.0` alongside an error — that reads as "clean" when
+  nothing was measured. Table-level rules define their own 0.0–1.0 semantics and document
+  them in the YAML description (e.g. `min_row_count` reports the shortfall as a fraction of
+  the threshold)
+- `error`: populate only when the rule cannot run due to misconfiguration; set
+  `passed=False` and leave `violation_rate=None`
 
 ## YAML definition (one file per rule)
 

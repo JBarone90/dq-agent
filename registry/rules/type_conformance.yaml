@@ -1,0 +1,21 @@
+id: type_conformance
+name: Type Conformance
+description: >
+  Fails if non-null values in a column do not parse as the expected type. Targets
+  columns stored as text that actually encode a narrower type (dates, counts, or
+  weights loaded as strings): the profiler flags the mismatch as inferred_dtype, the
+  contract declares the intended expected_type, and this rule validates it — each value
+  that does not parse is a violation. A column already of the expected type conforms
+  trivially. Supported expected_type values: int, float, date, datetime.
+tags: [validity, conformance]
+severity: error
+parameters:
+  column:
+    type: str
+    required: true
+  expected_type:
+    type: str
+    required: true
+execution:
+  module: dq_agent.rules.validity
+  function: type_conformance

@@ -11,6 +11,7 @@ EXPECTED_RULE_IDS = {
     "regex_match",
     "freshness",
     "min_row_count",
+    "type_conformance",
 }
 
 
@@ -97,6 +98,7 @@ MINIMAL_PARAMS = {
     "regex_match": {"column": "email", "pattern": ".*"},
     "freshness": {"column": "created_at", "max_days": 365},
     "min_row_count": {"min_rows": 1},
+    "type_conformance": {"column": "amount", "expected_type": "float"},
 }
 
 
