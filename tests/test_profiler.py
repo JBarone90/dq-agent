@@ -153,6 +153,57 @@ def test_profile_is_deterministic(orders_df):
     assert a == b
 
 
+def test_sampled_report_flags_estimates(orders_df):
+    report = profile(orders_df, dataset="orders", sampled=True)
+    assert report.sampled is True
+    # surplus rows do not extrapolate from a sample, so the count is withheld
+    assert report.table.duplicate_row_count is None
+    # the report still serializes and other stats are present (as estimates)
+    assert report.table.row_count == TOTAL_ROWS
+    assert _column(report, "amount").min is not None
+
+
+def test_unsampled_report_is_not_flagged(orders_df):
+    report = profile(orders_df, dataset="orders")
+    assert report.sampled is False
+    assert report.table.duplicate_row_count == 0
+
+
+# --- string-type inference (columns stored as text) ---
+
+def test_infer_string_typed_numerics_and_dates():
+    df = pl.DataFrame({
+        "count": ["1", "2", "3", "4"],          # integer stored as text
+        "weight": ["1.5", "2.0", "3.25", "4"],  # float stored as text
+        "day": ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"],
+        "label": ["alpha", "beta", "gamma", "delta"],  # genuinely text
+    })
+    report = profile(df, dataset="typed")
+    assert _column(report, "count").inferred_dtype == "Int64"
+    assert _column(report, "weight").inferred_dtype == "Float64"
+    assert _column(report, "day").inferred_dtype == "Date"
+    assert _column(report, "label").inferred_dtype is None
+    assert _column(report, "count").inferred_match_rate == 1.0
+
+
+def test_infer_string_dtype_respects_threshold():
+    # only 2/4 parse as int — below HINT_MATCH_THRESHOLD, so no mismatch is claimed
+    df = pl.DataFrame({"mixed": ["1", "2", "x", "y"]})
+    assert _column(profile(df, dataset="m"), "mixed").inferred_dtype is None
+
+
+def test_native_typed_columns_have_no_inferred_dtype(orders_df):
+    # amount is already numeric, created_at already a date — nothing to infer
+    assert _column(profile(orders_df, dataset="orders"), "amount").inferred_dtype is None
+    assert _column(profile(orders_df, dataset="orders"), "created_at").inferred_dtype is None
+
+
+def test_inferred_dtype_survives_redaction():
+    df = pl.DataFrame({"count": ["1", "2", "3"]})
+    safe = redact(profile(df, dataset="typed"))
+    assert _column(safe, "count").inferred_dtype == "Int64"
+
+
 def test_hint_sampling_hook(orders_df):
     report = profile(orders_df, dataset="orders", hint_sample_rows=5)
     # exact stats are unaffected by sampling; hints still computed
