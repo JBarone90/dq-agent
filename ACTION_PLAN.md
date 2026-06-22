@@ -121,6 +121,15 @@ _Single-agent first, sub-agent split only if it earns its complexity._
       proposal time; `run()` raises `SchemaDriftError` naming what drifted
 - [x] Human-readable run report: deterministic renderer from `list[RuleResult]` to a
       summary a non-technical dataset owner can read
+- [ ] Wire `load_postgres_profiling` into the agent's `profile_dataset` tool so the agent
+      can scope a Postgres table, not just a local file. The tool accepts a table name and
+      reads the connection URI from the environment — never from the LLM, since a URI
+      carries credentials (government-data privacy). Loading is adaptive against a
+      configured `max_rows` cap (`connectors.load_postgres_profiling`): the planner
+      estimate decides full load vs. `TABLESAMPLE`, and the tool passes `sampled=` straight
+      through to `profiler.profile` so a sampled report is flagged honestly. The sampling
+      parameters are deterministic tool config, not LLM-chosen arguments — the model only
+      supplies the locator. Files keep their current full-load path (local, no transfer cost)
 - [ ] Minimal web UI as localhost demo: use [agent-chat-ui](https://github.com/langchain-ai/agent-chat-ui)
       instead of building a custom front end. It is LangChain's off-the-shelf chat client for
       LangGraph servers: serve the scoping graph with `langgraph dev`, point agent-chat-ui at
