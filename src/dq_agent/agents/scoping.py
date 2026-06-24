@@ -38,7 +38,6 @@ from dq_agent.models import Contract, ContractRule
 from dq_agent.registry import Registry
 from dq_agent.report import describe_contract
 
-DEFAULT_MODEL = "google_genai:gemini-3.1-flash-lite"
 DEFAULT_RULES_DIR = Path("registry/rules")
 DEFAULT_CONTRACTS_DIR = Path("contracts")
 
@@ -309,17 +308,15 @@ def build_graph(
     defaults serve the localhost demo (model from $DQ_AGENT_MODEL, repo-root
     registry and contracts directories)."""
     if model is None:
-        from langchain.chat_models import init_chat_model
+        # Branch note: this diverges from main on purpose. The work environment is
+        # air-gapped and reaches Bedrock only through the internal bedrock-proxy, so
+        # the default model here is DeptBedrockChat rather than init_chat_model. The
+        # `model` parameter stays injectable, so tests are unaffected.
+        from dq_agent.agents.bedrock_chat import DEFAULT_MODEL_ID, DeptBedrockChat
 
-        model_id = os.environ.get("DQ_AGENT_MODEL", DEFAULT_MODEL)
-        try:
-            model = init_chat_model(model_id)
-        except Exception as exc:
-            raise RuntimeError(
-                f"could not initialise LLM '{model_id}': {exc}\n"
-                "Is the provider's langchain package installed and its API key "
-                "set in .env? (see .env.example)"
-            ) from exc
+        model = DeptBedrockChat(
+            model_id=os.environ.get("DQ_AGENT_MODEL", DEFAULT_MODEL_ID)
+        )
     if registry is None:
         registry = Registry(DEFAULT_RULES_DIR)
 
