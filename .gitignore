@@ -36,6 +36,10 @@ data/**/*.json
 .langgraph_api/
 !.env.example
 
+# Streamlit scoping app — local thread/checkpoint store
+*.sqlite
+*.sqlite-*
+
 # Agent-persisted contracts — only hand-written examples are committed;
 # contracts the scoping agent approves at runtime are local artifacts
 /contracts/*.yaml

@@ -1,36 +1,42 @@
 """Streamlit chat interface for the scoping agent — the non-coder-facing driver.
 
 This is the visual counterpart to `scripts/scoping_cli.py`: same in-process graph,
-same checkpointer requirement, same interrupt/resume contract — just rendered as a
-chat panel a dataset owner can use without touching a terminal. It deliberately
-mirrors the parts of agent-chat-ui that matter here:
+same checkpointer, same interrupt/resume contract — rendered as a chat panel a
+dataset owner can use without a terminal. It mirrors the parts of agent-chat-ui that
+matter here, plus a few extras:
 
-  - a chat transcript with the agent,
-  - **visible tool calls** (profile_dataset / list_rules / propose_contract) with a
-    sidebar **toggle** to show or hide them,
-  - the human approval gate rendered as approve / edit / reject controls, where
-    *edit* lets the owner change the contract YAML before approving.
+  - a chat transcript with the agent;
+  - **visible tool calls** with a sidebar **toggle** to show/hide them;
+  - **profile-at-a-glance** — the `profile_dataset` result renders as a stats table,
+    not raw JSON;
+  - the human approval gate as approve / edit / reject controls, with a **rule
+    provenance** view (each proposed rule next to the profile signal behind it) and
+    **edit** exposing the contract YAML before approval;
+  - **resumable threads** — conversations persist in a local SQLite checkpoint store,
+    so a closed tab can be reopened and continued;
+  - a **token-usage** readout (now live, via `DeptBedrockChat.usage_metadata`) and a
+    one-click **download** of the approved contract YAML.
 
 Run from the repo root (needs the work environment for the Bedrock proxy to answer):
 
     uv run --extra ui streamlit run app/scoping_app.py
 
-Scaffold status: the chat + approval loop is wired against the real graph. Two
-sidebar features are stubs pending an adapter change — token usage reads
-`AIMessage.usage_metadata`, which `DeptBedrockChat` does not yet populate, and
-streaming is not available because the adapter has no `_stream` (see the
+Not yet wired: token streaming — the Bedrock adapter has no `_stream` (see the
 DeptBedrockChat limitations docstring).
 """
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import uuid
+from pathlib import Path
 from typing import Any
 
 import streamlit as st
 import yaml
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
 from dq_agent.agents.scoping import build_graph
@@ -38,13 +44,23 @@ from dq_agent.models import Contract
 
 st.set_page_config(page_title="dq-agent · scoping", page_icon="🧪", layout="centered")
 
+# Local checkpoint store: threads survive a restart so a closed tab can resume.
+# Gitignored (*.sqlite). Holds conversation state only — never the scoped data.
+DB_PATH = "scoping_threads.sqlite"
+
 
 def _init_state() -> None:
-    """Build the graph once per session and hold it (with its checkpointer) in
-    session_state, so reruns reuse the same thread instead of resetting it."""
+    """Build the graph once per session over a persistent SQLite checkpointer, and
+    hold it (with its connection) in session_state so reruns reuse the same thread."""
     if "graph" not in st.session_state:
-        st.session_state.checkpointer = MemorySaver()
-        st.session_state.graph = build_graph(checkpointer=st.session_state.checkpointer)
+        # check_same_thread=False: Streamlit reruns the script on a worker thread that
+        # may differ from the one that opened the connection.
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        checkpointer = SqliteSaver(conn)
+        checkpointer.setup()  # create the checkpoint tables up front so reads don't race
+        st.session_state.conn = conn
+        st.session_state.checkpointer = checkpointer
+        st.session_state.graph = build_graph(checkpointer=checkpointer)
         st.session_state.thread_id = f"scoping-{uuid.uuid4().hex[:8]}"
         st.session_state.result = None  # latest graph result; holds the full transcript
 
@@ -54,8 +70,7 @@ def _config() -> dict[str, Any]:
 
 
 def _pending_interrupt(result: dict[str, Any] | None) -> dict[str, Any] | None:
-    """The approval-gate payload if the graph is paused, else None — the same
-    __interrupt__ check the CLI uses to tell a turn apart from a resume."""
+    """The approval-gate payload if the graph is paused, else None."""
     pending = (result or {}).get("__interrupt__")
     if not pending:
         return None
@@ -63,9 +78,35 @@ def _pending_interrupt(result: dict[str, Any] | None) -> dict[str, Any] | None:
     return getattr(item, "value", item)
 
 
+def _known_threads() -> list[str]:
+    """Distinct thread ids in the checkpoint store, for the resume picker. Best-effort:
+    the table may not exist yet, and its schema is an internal detail of SqliteSaver."""
+    try:
+        rows = st.session_state.conn.execute(
+            "SELECT DISTINCT thread_id FROM checkpoints"
+        ).fetchall()
+        return sorted(r[0] for r in rows)
+    except sqlite3.OperationalError:
+        return []
+
+
+def _load_thread(thread_id: str) -> dict[str, Any] | None:
+    """Rebuild a result-like dict from a persisted thread so a resumed conversation
+    renders (and a pending approval gate re-appears) without re-running the model."""
+    snapshot = st.session_state.graph.get_state(
+        {"configurable": {"thread_id": thread_id}}
+    )
+    if not snapshot.values:
+        return None
+    result = dict(snapshot.values)
+    interrupts = [i for task in snapshot.tasks for i in getattr(task, "interrupts", ())]
+    if interrupts:
+        result["__interrupt__"] = interrupts
+    return result
+
+
 def _token_usage(result: dict[str, Any] | None) -> tuple[int, int]:
-    """Sum input/output tokens across the transcript. Returns (0, 0) until the
-    adapter populates AIMessage.usage_metadata."""
+    """Sum input/output tokens across the transcript from AIMessage.usage_metadata."""
     inp = out = 0
     for msg in (result or {}).get("messages", []):
         usage = getattr(msg, "usage_metadata", None)
@@ -75,10 +116,43 @@ def _token_usage(result: dict[str, Any] | None) -> tuple[int, int]:
     return inp, out
 
 
+# --- transcript rendering ------------------------------------------------
+
+
+def _as_profile(content: str) -> dict[str, Any] | None:
+    """If a tool result is a profiler report, return it parsed, else None."""
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(data, dict) and "columns" in data and "dataset" in data:
+        return data
+    return None
+
+
+def _pct(value: float | None) -> str:
+    return "—" if value is None else f"{value * 100:.0f}%"
+
+
+def _render_profile(report: dict[str, Any]) -> None:
+    """profile-at-a-glance: the redacted report as a stats table, not raw JSON."""
+    rows = [
+        {
+            "column": col["name"],
+            "dtype": col["dtype"],
+            "null": _pct(col.get("null_rate")),
+            "unique": "—" if col.get("uniqueness_ratio") is None
+            else f"{col['uniqueness_ratio']:.2f}",
+            "hint": col.get("semantic_hint") or "",
+        }
+        for col in report["columns"]
+    ]
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+    sampled = " · sampled" if report.get("sampled") else ""
+    st.caption(f"{report['table']['row_count']} rows{sampled}")
+
+
 def _render_transcript(result: dict[str, Any] | None, show_tools: bool) -> None:
-    """Render the conversation. Tool calls and tool results are gated behind the
-    show_tools toggle so a non-technical owner sees a clean chat by default but can
-    open the hood to see what the agent actually did."""
     for msg in (result or {}).get("messages", []):
         if isinstance(msg, HumanMessage):
             with st.chat_message("user"):
@@ -93,18 +167,51 @@ def _render_transcript(result: dict[str, Any] | None, show_tools: bool) -> None:
                         with st.expander(f"🔧 tool call · {call['name']}", expanded=False):
                             st.json(call["args"])
         elif isinstance(msg, ToolMessage) and show_tools:
-            label = msg.name or msg.tool_call_id
+            report = _as_profile(str(msg.content))
             with st.chat_message("assistant"):
-                with st.expander(f"📤 tool result · {label}", expanded=False):
-                    st.code(str(msg.content))
+                if report is not None:
+                    with st.expander(f"📊 profile · {report['dataset']}", expanded=True):
+                        _render_profile(report)
+                else:
+                    with st.expander(
+                        f"📤 tool result · {msg.name or msg.tool_call_id}", expanded=False
+                    ):
+                        st.code(str(msg.content))
+
+
+# --- approval gate -------------------------------------------------------
+
+
+def _provenance_rows(draft: dict[str, Any], profile: dict[str, Any] | None) -> list[dict]:
+    """Each proposed rule next to the profile signal behind it, so the owner sees
+    *why* a rule was chosen before approving."""
+    cols = {c["name"]: c for c in (profile or {}).get("columns", [])}
+    rows = []
+    for rule in draft.get("rules", []):
+        column = (rule.get("params") or {}).get("column")
+        signal = ""
+        if column and column in cols:
+            col = cols[column]
+            bits = []
+            if col.get("null_rate"):
+                bits.append(f"{col['null_rate'] * 100:.0f}% null")
+            if col.get("uniqueness_ratio") is not None:
+                bits.append(f"uniq {col['uniqueness_ratio']:.2f}")
+            if col.get("semantic_hint"):
+                bits.append(f"hint: {col['semantic_hint']}")
+            signal = ", ".join(bits)
+        rows.append({
+            "rule": rule.get("rule_id", "?"),
+            "column": column or "(table)",
+            "profile signal": signal or "—",
+        })
+    return rows
 
 
 def _resume(decision: dict[str, Any]) -> None:
-    """Send one approval decision back through the interrupt and rerun."""
-    result = st.session_state.graph.invoke(
+    st.session_state.result = st.session_state.graph.invoke(
         Command(resume={"decisions": [decision]}), _config()
     )
-    st.session_state.result = result
     st.rerun()
 
 
@@ -115,10 +222,7 @@ def _draft_yaml(draft: dict[str, Any]) -> str:
         return yaml.safe_dump(draft, sort_keys=False)
 
 
-def _render_gate(payload: dict[str, Any]) -> None:
-    """The human approval gate: the plain-English contract review plus approve /
-    edit / reject controls. Edit exposes the contract YAML for the owner to amend
-    before approving — the structured `edit` decision the CLI cannot offer."""
+def _render_gate(payload: dict[str, Any], profile: dict[str, Any] | None) -> None:
     request = (payload.get("action_requests") or [{}])[0]
     draft = request.get("args", {}).get("contract", {})
 
@@ -126,16 +230,19 @@ def _render_gate(payload: dict[str, Any]) -> None:
     st.subheader("Approval requested")
     st.markdown(request.get("description", "(no description)"))
 
+    with st.expander("🔎 Why these rules? (profile signals)"):
+        st.dataframe(
+            _provenance_rows(draft, profile), use_container_width=True, hide_index=True
+        )
+
     approve_col, reject_col = st.columns(2)
     if approve_col.button("✅ Approve", type="primary", use_container_width=True):
         _resume({"type": "approve"})
-
-    feedback = st.session_state.get("gate_feedback", "")
     if reject_col.button("↩️ Request changes", use_container_width=True):
-        _resume({"type": "reject", "message": feedback or "please revise the contract"})
+        feedback = st.session_state.get("gate_feedback") or "please revise the contract"
+        _resume({"type": "reject", "message": feedback})
     st.text_input(
-        "Changes to request (sent to the agent if you click Request changes):",
-        key="gate_feedback",
+        "Changes to request (sent if you click Request changes):", key="gate_feedback"
     )
 
     with st.expander("✏️ Edit the contract directly, then approve"):
@@ -157,10 +264,10 @@ def _render_gate(payload: dict[str, Any]) -> None:
                 })
 
 
-def main() -> None:
-    _init_state()
-    result = st.session_state.result
+# --- page ----------------------------------------------------------------
 
+
+def _sidebar(result: dict[str, Any] | None) -> bool:
     with st.sidebar:
         st.header("dq-agent · scoping")
         show_tools = st.toggle("Show tool calls", value=True)
@@ -168,15 +275,27 @@ def main() -> None:
 
         inp, out = _token_usage(result)
         st.metric("Tokens (in / out)", f"{inp} / {out}")
-        st.caption(
-            "0 until the Bedrock adapter surfaces `usage_metadata` "
-            "(see DeptBedrockChat limitations)."
-        )
+        st.caption("Summed from the Bedrock response usage.")
 
+        st.divider()
+        threads = [t for t in _known_threads() if t != st.session_state.thread_id]
+        if threads:
+            choice = st.selectbox("Resume a saved thread", threads, index=None)
+            if choice and st.button("Open thread"):
+                st.session_state.thread_id = choice
+                st.session_state.result = _load_thread(choice)
+                st.rerun()
         if st.button("🔄 New conversation"):
-            for key in ("graph", "checkpointer", "thread_id", "result"):
-                st.session_state.pop(key, None)
+            st.session_state.thread_id = f"scoping-{uuid.uuid4().hex[:8]}"
+            st.session_state.result = None
             st.rerun()
+    return show_tools
+
+
+def main() -> None:
+    _init_state()
+    result = st.session_state.result
+    show_tools = _sidebar(result)
 
     st.title("Scope a data quality contract")
     st.caption(
@@ -186,13 +305,24 @@ def main() -> None:
 
     _render_transcript(result, show_tools)
 
-    if (result or {}).get("contract_path"):
-        st.success(f"Contract approved and saved to `{result['contract_path']}`")
+    contract_path = (result or {}).get("contract_path")
+    if contract_path:
+        st.success(f"Contract approved and saved to `{contract_path}`")
+        try:
+            yaml_text = Path(contract_path).read_text()
+            st.download_button(
+                "⬇️ Download contract YAML",
+                yaml_text,
+                file_name=Path(contract_path).name,
+                mime="application/x-yaml",
+            )
+        except OSError:
+            pass
         return
 
     payload = _pending_interrupt(result)
     if payload is not None:
-        _render_gate(payload)
+        _render_gate(payload, (result or {}).get("profile"))
         return
 
     prompt = st.chat_input("Message the scoping agent…")
