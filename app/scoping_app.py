@@ -43,6 +43,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
+from dq_agent.agents.bedrock_chat import BedrockProxyError
 from dq_agent.agents.scoping import build_graph
 from dq_agent.models import Contract
 
@@ -244,12 +245,23 @@ def _provenance_rows(draft: dict[str, Any], profile: dict[str, Any] | None) -> l
     return rows
 
 
-def _resume(decision: dict[str, Any]) -> None:
+def _invoke(graph_input: Any) -> None:
+    """Advance the graph and store the result, or render a clear error and stop.
+
+    A bedrock-proxy failure (bad token, model_id, or proxy URL) raises BedrockProxyError;
+    catch it so the user sees the diagnostic message in the UI instead of Streamlit's raw
+    traceback box, and the existing transcript stays put for a retry."""
     graph, _ = _resources()
-    st.session_state.result = graph.invoke(
-        Command(resume={"decisions": [decision]}), _config()
-    )
+    try:
+        st.session_state.result = graph.invoke(graph_input, _config())
+    except BedrockProxyError as exc:
+        st.error(f"The model call failed.\n\n{exc}")
+        st.stop()
     st.rerun()
+
+
+def _resume(decision: dict[str, Any]) -> None:
+    _invoke(Command(resume={"decisions": [decision]}))
 
 
 def _draft_yaml(draft: dict[str, Any]) -> str:
@@ -375,11 +387,7 @@ def main() -> None:
 
     prompt = st.chat_input("Message the scoping agent…")
     if prompt:
-        graph, _ = _resources()
-        st.session_state.result = graph.invoke(
-            {"messages": [{"role": "user", "content": prompt}]}, _config()
-        )
-        st.rerun()
+        _invoke({"messages": [{"role": "user", "content": prompt}]})
 
 
 if __name__ == "__main__":

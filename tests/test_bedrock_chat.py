@@ -10,16 +10,27 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.tools import tool
 
 from dq_agent.agents import bedrock_chat
-from dq_agent.agents.bedrock_chat import DeptBedrockChat, _to_anthropic, _to_anthropic_tools
+from dq_agent.agents.bedrock_chat import (
+    BedrockProxyError,
+    DeptBedrockChat,
+    _to_anthropic,
+    _to_anthropic_tools,
+)
 
 
 class FakeResponse:
     def __init__(self, payload, headers=None):
         self._payload = payload
         self.headers = headers or {}
+        self.text = "" if payload is _NON_JSON else str(payload)
 
     def json(self):
+        if self._payload is _NON_JSON:
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
         return self._payload
+
+
+_NON_JSON = object()  # sentinel: FakeResponse whose .json() raises, like a non-JSON body
 
 
 @tool
@@ -165,6 +176,37 @@ def test_generate_omits_cost_when_header_absent(monkeypatch):
     result = DeptBedrockChat().invoke([HumanMessage("hi")])
     assert "cost_usd" not in result.response_metadata
     assert "tokens_used" not in result.response_metadata
+
+
+# --- defensive error handling --------------------------------------------
+
+
+def test_proxy_error_becomes_bedrock_proxy_error(monkeypatch):
+    """A failure from dwutils (proxy returned an error) is re-raised by the real `_invoke`
+    as a BedrockProxyError naming the likely cause, not surfaced raw. We inject a fake
+    `dwutils` module whose `bedrock.invoke` raises, then exercise the real wrapper."""
+    import sys
+    import types
+
+    def boom(request, show_usage):
+        raise RuntimeError("403 Forbidden")
+
+    fake = types.ModuleType("dwutils")
+    fake.bedrock = types.SimpleNamespace(invoke=boom)
+    monkeypatch.setitem(sys.modules, "dwutils", fake)
+
+    with pytest.raises(BedrockProxyError) as info:
+        DeptBedrockChat(model_id="eu.anthropic.claude-sonnet-4-6").invoke(
+            [HumanMessage("hi")]
+        )
+    assert "eu.anthropic.claude-sonnet-4-6" in str(info.value)
+
+
+def test_generate_non_json_body_becomes_bedrock_proxy_error(monkeypatch):
+    """A 2xx whose body is not JSON surfaces a BedrockProxyError, not a bare ValueError."""
+    monkeypatch.setattr(bedrock_chat, "_invoke", lambda request: FakeResponse(_NON_JSON))
+    with pytest.raises(BedrockProxyError):
+        DeptBedrockChat().invoke([HumanMessage("hi")])
 
 
 def test_generate_includes_system_when_present(monkeypatch):

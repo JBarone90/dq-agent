@@ -38,15 +38,56 @@ DEFAULT_MODEL_ID = "eu.anthropic.claude-sonnet-4-6"
 ANTHROPIC_VERSION = "bedrock-2023-05-31"
 
 
+class BedrockProxyError(RuntimeError):
+    """A call to the bedrock-proxy failed in a way the caller should act on.
+
+    Exists to replace the confusing exception dwutils surfaces on a proxy error:
+    `dwutils.bedrock.invoke` calls `raise_for_status()` and then, in its handler, does
+    `raise RuntimeError(error.response.json())` — but a proxy error body is usually not
+    JSON (an empty body, or an HTML 401/403/502 page), so `.json()` itself raises a
+    `JSONDecodeError` that *masks* the real HTTP status. We catch that here and raise a
+    message that names the likely cause instead."""
+
+
+def _diagnose(request: dict[str, Any], exc: Exception) -> str:
+    """Build an actionable message for a failed proxy call. Names the usual suspects so
+    a reader does not have to decode dwutils' masked `JSONDecodeError`."""
+    return (
+        f"bedrock-proxy call failed ({type(exc).__name__}: {exc}). "
+        "The proxy returned an error before a usable response; dwutils can mask the real "
+        "HTTP status while formatting it. Most likely one of:\n"
+        "  - BEDROCK_TOKEN missing or expired (401/403);\n"
+        f"  - model_id {request.get('model_id')!r} not available on the proxy (run "
+        "`scripts/explore_bedrock.py` to list models);\n"
+        "  - BEDROCK_PROXY_URL wrong or unreachable (timeout/connection error).\n"
+        "Run `uv run python scripts/explore_bedrock.py` to see the live proxy status."
+    )
+
+
 def _invoke(request: dict[str, Any]) -> Any:
     """Send one request through the bedrock-proxy and return the raw `Response`.
 
-    Imported lazily so this module loads without `dwutils` (e.g. on a dev laptop
-    or in CI); the unit tests monkeypatch this function.
+    `dwutils` is imported lazily so this module loads without it (e.g. on a dev laptop
+    or in CI); the unit tests monkeypatch this function. Proxy/transport failures are
+    re-raised as `BedrockProxyError` with a diagnostic message — see that class for why
+    the raw exception is unhelpful.
     """
-    from dwutils import bedrock  # internal package, only present at work
+    try:
+        from dwutils import bedrock  # internal package, only present at work
+    except ImportError as exc:
+        raise BedrockProxyError(
+            "dwutils is not importable — the bedrock proxy is only available in the work "
+            "environment. To run elsewhere, inject a model: build_graph(model=...)."
+        ) from exc
 
-    return bedrock.invoke(request=request, show_usage=False)
+    # JSONDecodeError (the masked case) subclasses RequestException; RuntimeError is what
+    # dwutils raises when the error body *is* JSON. Both mean the same: proxy call failed.
+    from requests.exceptions import RequestException
+
+    try:
+        return bedrock.invoke(request=request, show_usage=False)
+    except (RequestException, RuntimeError) as exc:
+        raise BedrockProxyError(_diagnose(request, exc)) from exc
 
 
 def _to_anthropic(messages: Sequence[BaseMessage]) -> tuple[str, list[dict[str, Any]]]:
@@ -170,8 +211,9 @@ class DeptBedrockChat(BaseChatModel):
       `_header_cost` — cost is the proxy's, never a hardcoded price table). Account-level
       daily budget is a separate call, `dwutils.bedrock.get_usage()`, not done here.
       Cache-read/-write token fields are not captured.
-    - **Minimal error handling.** A proxy/HTTP error or a malformed response body
-      surfaces raw, not as a typed, retryable error.
+    - **Error handling is diagnostic, not retryable.** A proxy/transport failure or a
+      non-JSON body is re-raised as `BedrockProxyError` with a message naming the likely
+      cause (token, model_id, proxy URL) — but there is no automatic retry/backoff.
     - **Fixed decoding params.** `max_tokens` defaults to 10000; temperature / top_p
       are not plumbed through.
     """
@@ -206,7 +248,14 @@ class DeptBedrockChat(BaseChatModel):
             request["stop_sequences"] = stop
 
         response = _invoke(request)
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:  # 2xx but a non-JSON body — surface it, don't mask
+            raise BedrockProxyError(
+                "bedrock-proxy returned a response that is not JSON. The call succeeded at "
+                "the transport level but the body could not be parsed as an Anthropic "
+                f"response. First bytes: {str(getattr(response, 'text', ''))[:200]!r}"
+            ) from exc
 
         text = ""
         tool_calls = []

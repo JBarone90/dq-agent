@@ -31,6 +31,7 @@ from typing import Any, Iterator
 from langchain_core.messages import AIMessage
 from langgraph.types import Command
 
+from dq_agent.agents.bedrock_chat import BedrockProxyError
 from dq_agent.agents.scoping import build_graph
 
 _QUIT = {"quit", "exit", ":q"}
@@ -160,6 +161,11 @@ def main() -> None:
         graph = build_graph(checkpointer=checkpointer)
         try:
             converse(graph, thread_id)
+        except BedrockProxyError as exc:
+            print(f"\n⚠️  The model call failed.\n\n{exc}")
+            if args.db:
+                print(f"\nThe thread is saved — resume with "
+                      f"--db {args.db} --thread {thread_id} once the proxy is reachable.")
         except KeyboardInterrupt:
             print("\nStopped. " + (
                 f"Resume with --db {args.db} --thread {thread_id}"
