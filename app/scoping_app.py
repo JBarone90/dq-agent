@@ -14,8 +14,12 @@ matter here, plus a few extras:
     **edit** exposing the contract YAML before approval;
   - **resumable threads** — conversations persist in a local SQLite checkpoint store,
     so a closed tab can be reopened and continued;
-  - a **token-usage** readout (now live, via `DeptBedrockChat.usage_metadata`) and a
-    one-click **download** of the approved contract YAML.
+  - **token-usage** and a dev **session-cost** readout (via `usage_metadata` and
+    `response_metadata['cost_usd']`) and a one-click **download** of the approved
+    contract YAML.
+
+The graph and its SQLite connection are shared across sessions via `st.cache_resource`
+(`_resources`); only per-conversation state lives in `st.session_state`.
 
 Run from the repo root (needs the work environment for the Bedrock proxy to answer):
 
@@ -49,18 +53,26 @@ st.set_page_config(page_title="dq-agent · scoping", page_icon="🧪", layout="c
 DB_PATH = "scoping_threads.sqlite"
 
 
+@st.cache_resource
+def _resources() -> tuple[Any, sqlite3.Connection]:
+    """The graph and its checkpoint connection — process-global, built once and shared
+    across sessions and reruns. This is exactly the `cache_resource` use case:
+    compiling the graph (registry scan, model init) and opening the SQLite connection
+    are expensive and safe to share. Per-conversation state (thread_id, transcript)
+    stays in session_state, so users remain isolated by thread_id on the shared store.
+
+    check_same_thread=False: a cached connection is reused across Streamlit's worker
+    threads. SQLite serializes writes; for many concurrent writers, move to a
+    PostgresSaver."""
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    checkpointer = SqliteSaver(conn)
+    checkpointer.setup()  # create the checkpoint tables up front so reads don't race
+    return build_graph(checkpointer=checkpointer), conn
+
+
 def _init_state() -> None:
-    """Build the graph once per session over a persistent SQLite checkpointer, and
-    hold it (with its connection) in session_state so reruns reuse the same thread."""
-    if "graph" not in st.session_state:
-        # check_same_thread=False: Streamlit reruns the script on a worker thread that
-        # may differ from the one that opened the connection.
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        checkpointer = SqliteSaver(conn)
-        checkpointer.setup()  # create the checkpoint tables up front so reads don't race
-        st.session_state.conn = conn
-        st.session_state.checkpointer = checkpointer
-        st.session_state.graph = build_graph(checkpointer=checkpointer)
+    """Per-session conversation state; the graph/connection are shared via _resources()."""
+    if "thread_id" not in st.session_state:
         st.session_state.thread_id = f"scoping-{uuid.uuid4().hex[:8]}"
         st.session_state.result = None  # latest graph result; holds the full transcript
 
@@ -81,10 +93,9 @@ def _pending_interrupt(result: dict[str, Any] | None) -> dict[str, Any] | None:
 def _known_threads() -> list[str]:
     """Distinct thread ids in the checkpoint store, for the resume picker. Best-effort:
     the table may not exist yet, and its schema is an internal detail of SqliteSaver."""
+    _, conn = _resources()
     try:
-        rows = st.session_state.conn.execute(
-            "SELECT DISTINCT thread_id FROM checkpoints"
-        ).fetchall()
+        rows = conn.execute("SELECT DISTINCT thread_id FROM checkpoints").fetchall()
         return sorted(r[0] for r in rows)
     except sqlite3.OperationalError:
         return []
@@ -93,9 +104,8 @@ def _known_threads() -> list[str]:
 def _load_thread(thread_id: str) -> dict[str, Any] | None:
     """Rebuild a result-like dict from a persisted thread so a resumed conversation
     renders (and a pending approval gate re-appears) without re-running the model."""
-    snapshot = st.session_state.graph.get_state(
-        {"configurable": {"thread_id": thread_id}}
-    )
+    graph, _ = _resources()
+    snapshot = graph.get_state({"configurable": {"thread_id": thread_id}})
     if not snapshot.values:
         return None
     result = dict(snapshot.values)
@@ -114,6 +124,20 @@ def _token_usage(result: dict[str, Any] | None) -> tuple[int, int]:
             inp += usage.get("input_tokens", 0)
             out += usage.get("output_tokens", 0)
     return inp, out
+
+
+def _session_cost(result: dict[str, Any] | None) -> float | None:
+    """Total $ across the transcript from response_metadata['cost_usd'], or None when no
+    message carries a cost — so the dev metric stays hidden rather than showing a wrong
+    $0 when the proxy isn't returning cost yet (see DeptBedrockChat._cost_usd)."""
+    total = 0.0
+    seen = False
+    for msg in (result or {}).get("messages", []):
+        meta = getattr(msg, "response_metadata", None) or {}
+        if "cost_usd" in meta:
+            total += meta["cost_usd"]
+            seen = True
+    return total if seen else None
 
 
 # --- transcript rendering ------------------------------------------------
@@ -209,7 +233,8 @@ def _provenance_rows(draft: dict[str, Any], profile: dict[str, Any] | None) -> l
 
 
 def _resume(decision: dict[str, Any]) -> None:
-    st.session_state.result = st.session_state.graph.invoke(
+    graph, _ = _resources()
+    st.session_state.result = graph.invoke(
         Command(resume={"decisions": [decision]}), _config()
     )
     st.rerun()
@@ -277,6 +302,10 @@ def _sidebar(result: dict[str, Any] | None) -> bool:
         st.metric("Tokens (in / out)", f"{inp} / {out}")
         st.caption("Summed from the Bedrock response usage.")
 
+        cost = _session_cost(result)
+        if cost is not None:
+            st.metric("Session cost (dev)", f"${cost:.4f}")
+
         st.divider()
         threads = [t for t in _known_threads() if t != st.session_state.thread_id]
         if threads:
@@ -327,7 +356,8 @@ def main() -> None:
 
     prompt = st.chat_input("Message the scoping agent…")
     if prompt:
-        st.session_state.result = st.session_state.graph.invoke(
+        graph, _ = _resources()
+        st.session_state.result = graph.invoke(
             {"messages": [{"role": "user", "content": prompt}]}, _config()
         )
         st.rerun()
