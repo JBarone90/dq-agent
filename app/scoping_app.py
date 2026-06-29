@@ -14,9 +14,9 @@ matter here, plus a few extras:
     **edit** exposing the contract YAML before approval;
   - **resumable threads** — conversations persist in a local SQLite checkpoint store,
     so a closed tab can be reopened and continued;
-  - **token-usage** and a dev **session-cost** readout (via `usage_metadata` and
-    `response_metadata['cost_usd']`) and a one-click **download** of the approved
-    contract YAML.
+  - **token-usage**, a dev **session-cost** readout (per-call `x-cost` headers), the
+    account **daily budget** (`bedrock.get_usage()`, cached), and a one-click
+    **download** of the approved contract YAML.
 
 The graph and its SQLite connection are shared across sessions via `st.cache_resource`
 (`_resources`); only per-conversation state lives in `st.session_state`.
@@ -138,6 +138,18 @@ def _session_cost(result: dict[str, Any] | None) -> float | None:
             total += meta["cost_usd"]
             seen = True
     return total if seen else None
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _daily_usage() -> dict[str, str] | None:
+    """Account-level Bedrock daily budget via `dwutils.bedrock.get_usage()`. Cached for
+    a minute (st.cache_data) so it is not re-fetched on every rerun; None off-network."""
+    try:
+        from dwutils import bedrock
+
+        return bedrock.get_usage()
+    except Exception:
+        return None
 
 
 # --- transcript rendering ------------------------------------------------
@@ -305,6 +317,13 @@ def _sidebar(result: dict[str, Any] | None) -> bool:
         cost = _session_cost(result)
         if cost is not None:
             st.metric("Session cost (dev)", f"${cost:.4f}")
+
+        usage = _daily_usage()
+        if usage:
+            st.divider()
+            st.caption("Bedrock daily budget")
+            st.write(f"{usage['Current Daily Used']} of {usage['Daily Limit']} used")
+            st.caption(f"{usage['Daily Usage Remaining']} remaining")
 
         st.divider()
         threads = [t for t in _known_threads() if t != st.session_state.thread_id]
