@@ -109,6 +109,23 @@ class DeptBedrockChat(BaseChatModel):
 
     Bound tools are carried as a `tools` kwarg via `self.bind`, so `bind_tools`
     needs no mutable state on the instance.
+
+    Limitations (acceptable for the scoping agent; these are the gaps to close
+    before this adapter could be upstreamed into `dwutils.bedrock` as a shared
+    LangChain integration):
+
+    - **Synchronous only.** Implements `_generate`; there is no `_agenerate` /
+      `_astream`, so a high-concurrency web UI blocks a worker thread per call.
+    - **No streaming.** `_stream` is unimplemented — a full response is returned at
+      once, so a UI cannot render tokens as they are produced.
+    - **No usage metadata.** The proxy is called with `show_usage=False` and token
+      counts are discarded; `AIMessage.usage_metadata` is left unset, so a
+      token/cost view has nothing to read. (Surfacing it is a small change here:
+      request usage and map it onto the returned `AIMessage`.)
+    - **Minimal error handling.** A proxy/HTTP error or a malformed response body
+      surfaces raw, not as a typed, retryable error.
+    - **Fixed decoding params.** `max_tokens` defaults to 10000; temperature / top_p
+      are not plumbed through.
     """
 
     model_id: str = DEFAULT_MODEL_ID
