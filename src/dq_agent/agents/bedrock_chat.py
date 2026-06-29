@@ -122,21 +122,32 @@ def _usage_metadata(usage: dict[str, Any] | None) -> dict[str, int] | None:
     }
 
 
-def _cost_usd(data: dict[str, Any]) -> float | None:
-    """Per-call cost when the proxy enriches the response with it, else None.
+def _header_cost(headers: Any) -> float | None:
+    """Per-call cost in USD from the proxy's `x-cost` response header, else None.
 
-    The raw Anthropic body carries tokens only — `dwutils.bedrock` is the pricing
-    source (this deliberately does NOT hardcode a price table, which would drift and
-    ignore the org's negotiated Bedrock rates). The exact field the proxy uses is not
-    yet pinned, so this checks the likely shapes; returns None when absent so the UI
-    shows nothing rather than a wrong number. Confirm with
-    `inspect.getsource(dwutils.bedrock.invoke)` and tighten to the real key."""
-    usage = data.get("usage") or {}
-    for value in (data.get("cost"), data.get("cost_usd"),
-                  usage.get("cost"), usage.get("cost_usd")):
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
-    return None
+    The bedrock-proxy stamps `x-cost` (and `x-tokens-used`) on every response; the
+    `show_usage` flag only controls whether dwutils *prints* them, so we read the
+    header ourselves regardless of it — and the cost comes from the proxy's pricing,
+    never a hardcoded table. Returns None if the header is missing or unparseable, so
+    a cost view shows nothing rather than a wrong number."""
+    raw = headers.get("x-cost") if headers else None
+    if raw is None:
+        return None
+    try:
+        return float(str(raw).lstrip("$").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _header_int(headers: Any, name: str) -> int | None:
+    """Parse an integer response header (e.g. `x-tokens-used`), None if absent/bad."""
+    raw = headers.get(name) if headers else None
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 class DeptBedrockChat(BaseChatModel):
@@ -153,12 +164,12 @@ class DeptBedrockChat(BaseChatModel):
       `_astream`, so a high-concurrency web UI blocks a worker thread per call.
     - **No streaming.** `_stream` is unimplemented — a full response is returned at
       once, so a UI cannot render tokens as they are produced.
-    - **Usage and (when the proxy provides it) cost are surfaced.** Token counts from
-      the response `usage` block map onto `AIMessage.usage_metadata`; a per-call cost
-      is read from the response when present and stashed in
-      `response_metadata["cost_usd"]` (see `_cost_usd` — no hardcoded price table;
-      `dwutils.bedrock` is the pricing source). Cache-read/-write token fields are not
-      captured.
+    - **Usage and cost are surfaced.** Token counts from the response `usage` block map
+      onto `AIMessage.usage_metadata`; the proxy's per-call `x-cost` / `x-tokens-used`
+      response headers map onto `response_metadata["cost_usd"]` / `["tokens_used"]` (see
+      `_header_cost` — cost is the proxy's, never a hardcoded price table). Account-level
+      daily budget is a separate call, `dwutils.bedrock.get_usage()`, not done here.
+      Cache-read/-write token fields are not captured.
     - **Minimal error handling.** A proxy/HTTP error or a malformed response body
       surfaces raw, not as a typed, retryable error.
     - **Fixed decoding params.** `max_tokens` defaults to 10000; temperature / top_p
@@ -194,7 +205,8 @@ class DeptBedrockChat(BaseChatModel):
         if stop:
             request["stop_sequences"] = stop
 
-        data = _invoke(request).json()
+        response = _invoke(request)
+        data = response.json()
 
         text = ""
         tool_calls = []
@@ -210,10 +222,14 @@ class DeptBedrockChat(BaseChatModel):
                     "type": "tool_call",
                 })
 
+        # Per-call cost/tokens live in the proxy response headers, not the body.
         metadata: dict[str, Any] = {"stop_reason": data.get("stop_reason")}
-        cost = _cost_usd(data)
+        cost = _header_cost(response.headers)
         if cost is not None:
             metadata["cost_usd"] = cost
+        tokens_used = _header_int(response.headers, "x-tokens-used")
+        if tokens_used is not None:
+            metadata["tokens_used"] = tokens_used
 
         message = AIMessage(
             content=text,

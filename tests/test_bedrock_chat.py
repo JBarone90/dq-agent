@@ -14,8 +14,9 @@ from dq_agent.agents.bedrock_chat import DeptBedrockChat, _to_anthropic, _to_ant
 
 
 class FakeResponse:
-    def __init__(self, payload):
+    def __init__(self, payload, headers=None):
         self._payload = payload
+        self.headers = headers or {}
 
     def json(self):
         return self._payload
@@ -143,25 +144,27 @@ def test_generate_usage_absent_is_none(monkeypatch):
     assert result.usage_metadata is None
 
 
-def test_generate_captures_cost_when_present(monkeypatch):
+def test_generate_captures_cost_and_tokens_from_headers(monkeypatch):
     monkeypatch.setattr(
         bedrock_chat, "_invoke",
-        lambda request: FakeResponse({
-            "content": [{"type": "text", "text": "ok"}],
-            "usage": {"input_tokens": 1, "output_tokens": 1, "cost": 0.0034},
-        }),
+        lambda request: FakeResponse(
+            {"content": [{"type": "text", "text": "ok"}]},
+            headers={"x-cost": "$0.0034", "x-tokens-used": "42"},
+        ),
     )
     result = DeptBedrockChat().invoke([HumanMessage("hi")])
     assert result.response_metadata["cost_usd"] == 0.0034
+    assert result.response_metadata["tokens_used"] == 42
 
 
-def test_generate_omits_cost_when_absent(monkeypatch):
+def test_generate_omits_cost_when_header_absent(monkeypatch):
     monkeypatch.setattr(
         bedrock_chat, "_invoke",
         lambda request: FakeResponse({"content": [{"type": "text", "text": "ok"}]}),
     )
     result = DeptBedrockChat().invoke([HumanMessage("hi")])
     assert "cost_usd" not in result.response_metadata
+    assert "tokens_used" not in result.response_metadata
 
 
 def test_generate_includes_system_when_present(monkeypatch):
