@@ -120,6 +120,29 @@ def test_generate_parses_tool_use(monkeypatch):
     ]
 
 
+def test_generate_surfaces_usage(monkeypatch):
+    monkeypatch.setattr(
+        bedrock_chat, "_invoke",
+        lambda request: FakeResponse({
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 12, "output_tokens": 5},
+        }),
+    )
+    result = DeptBedrockChat().invoke([HumanMessage("hi")])
+    assert result.usage_metadata == {
+        "input_tokens": 12, "output_tokens": 5, "total_tokens": 17,
+    }
+
+
+def test_generate_usage_absent_is_none(monkeypatch):
+    monkeypatch.setattr(
+        bedrock_chat, "_invoke",
+        lambda request: FakeResponse({"content": [{"type": "text", "text": "ok"}]}),
+    )
+    result = DeptBedrockChat().invoke([HumanMessage("hi")])
+    assert result.usage_metadata is None
+
+
 def test_generate_includes_system_when_present(monkeypatch):
     captured = {}
 

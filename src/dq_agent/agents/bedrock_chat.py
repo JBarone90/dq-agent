@@ -104,6 +104,24 @@ def _to_anthropic_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
     return specs
 
 
+def _usage_metadata(usage: dict[str, Any] | None) -> dict[str, int] | None:
+    """Map the Anthropic response `usage` block to LangChain's UsageMetadata so
+    `AIMessage.usage_metadata` carries token counts for cost/usage views.
+
+    The `usage` block is part of the Bedrock response body and is independent of the
+    proxy's `show_usage` print flag, so it is read straight from `.json()`. Returns
+    None when absent, so a caller can tell "unknown" apart from a genuine zero."""
+    if not usage:
+        return None
+    input_tokens = usage.get("input_tokens", 0)
+    output_tokens = usage.get("output_tokens", 0)
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
 class DeptBedrockChat(BaseChatModel):
     """Chat model that calls Bedrock (Claude) through the internal bedrock-proxy.
 
@@ -118,10 +136,10 @@ class DeptBedrockChat(BaseChatModel):
       `_astream`, so a high-concurrency web UI blocks a worker thread per call.
     - **No streaming.** `_stream` is unimplemented — a full response is returned at
       once, so a UI cannot render tokens as they are produced.
-    - **No usage metadata.** The proxy is called with `show_usage=False` and token
-      counts are discarded; `AIMessage.usage_metadata` is left unset, so a
-      token/cost view has nothing to read. (Surfacing it is a small change here:
-      request usage and map it onto the returned `AIMessage`.)
+    - **Usage is surfaced but unpriced.** Token counts from the response `usage`
+      block are mapped onto `AIMessage.usage_metadata` (see `_usage_metadata`), but
+      there is no cost/$ translation and cache-read/-write token fields are not
+      captured.
     - **Minimal error handling.** A proxy/HTTP error or a malformed response body
       surfaces raw, not as a typed, retryable error.
     - **Fixed decoding params.** `max_tokens` defaults to 10000; temperature / top_p
@@ -176,6 +194,7 @@ class DeptBedrockChat(BaseChatModel):
         message = AIMessage(
             content=text,
             tool_calls=tool_calls,
+            usage_metadata=_usage_metadata(data.get("usage")),
             response_metadata={"stop_reason": data.get("stop_reason")},
         )
         return ChatResult(generations=[ChatGeneration(message=message)])
