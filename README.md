@@ -7,7 +7,7 @@
 
 A large language model helps you _author_ the contract through a conversation, but it **never touches your data at execution time**. Approved rules run as ordinary, tested Python — not prompts. The LLM is a reasoning layer for scoping, not an execution engine.
 
-It ships as a **library** (`import dq_agent`) plus a **LangGraph dev server** for the optional chat interface — there is no CLI yet.
+It ships as a **library** (`import dq_agent`) plus a **terminal CLI** for the scoping conversation (`scripts/scoping_cli.py`), with an optional Streamlit chat panel for non-technical owners.
 
 > **Why not Great Expectations or Soda?** Those are excellent execution frameworks. dq-agent is about the step _before_ execution: turning a dataset owner's knowledge into a tested rule suite through conversation, while keeping the contract format portable and owned by this tool (export adapters to other frameworks can be added later). The deterministic engine here is deliberately small — the differentiator is the curated rule registry and the scoping workflow.
 
@@ -117,53 +117,32 @@ The engine enforces the gate at run time: it raises `ContractNotApprovedError` f
 
 ### Running the chat interface
 
-The chat UI is [agent-chat-ui](https://github.com/langchain-ai/agent-chat-ui) — LangChain's off-the-shelf client for LangGraph servers. Three steps:
+> **Branch note (`feat/bedrock-proxy-adapter`).** This branch targets an air-gapped work
+> environment with no npm mirror, so it does **not** use agent-chat-ui or a `langgraph dev`
+> server. The interface is a local, in-process driver instead: a terminal CLI today, and an
+> optional Streamlit chat panel for non-technical owners. The default model is the internal
+> Bedrock proxy (`DeptBedrockChat`), not Gemini.
 
-**1. Configure the model.** The dev default is Gemini 3.1 Flash Lite on Google's free tier (chosen for its higher free-tier daily request allowance), whose LangChain package ships in the `agents` extra:
+**1. Install the agent extra.**
 
 ```bash
 uv sync --extra agents
-cp .env.example .env       # then put your GOOGLE_API_KEY in .env
 ```
 
-Get a free key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
+The default model is `DeptBedrockChat` (`src/dq_agent/agents/bedrock_chat.py`), which reaches Anthropic-on-Bedrock through the internal `dwutils.bedrock` proxy — no API key, no internet. `dwutils` is an internal package assumed importable in the work environment; set `DQ_AGENT_MODEL` to pick a Bedrock model id (defaults to `eu.anthropic.claude-sonnet-4-6`). The `model` argument to `build_graph` stays injectable, so a different LangChain model can be substituted in tests or off-network experiments without code changes.
 
-**The provider is a config value, not code.** At startup the agent reads `DQ_AGENT_MODEL` (a `provider:model` string) from `.env` and passes it to LangChain's `init_chat_model`, which dynamically imports the matching `langchain-<provider>` integration. Switching providers is two steps, no code changes:
-
-| Provider         | Add the package              | Set in `.env`                                                          |
-| ---------------- | ---------------------------- | ---------------------------------------------------------------------- |
-| Google (default) | _(bundled)_                  | `DQ_AGENT_MODEL=google_genai:gemini-3.1-flash-lite` + `GOOGLE_API_KEY=...`  |
-| Anthropic        | `uv add langchain-anthropic` | `DQ_AGENT_MODEL=anthropic:claude-sonnet-4-6` + `ANTHROPIC_API_KEY=...` |
-| OpenAI           | `uv add langchain-openai`    | `DQ_AGENT_MODEL=openai:gpt-4o` + `OPENAI_API_KEY=...`                  |
-| Ollama (local)   | `uv add langchain-ollama`    | `DQ_AGENT_MODEL=ollama:qwen3:8b` _(no key)_                            |
-
-If the chosen provider's package or API key is missing, the agent fails fast at startup with a message pointing you at the provider's `langchain-*` package and `.env` key.
-
-**2. Serve the graph.** From the repo root:
+**2. Run the CLI.** From the repo root:
 
 ```bash
-uv run langgraph dev       # serves the 'scoping' graph at http://localhost:2024
+uv run python scripts/scoping_cli.py                       # in-memory session
+uv run python scripts/scoping_cli.py --db scoping.sqlite   # durable, resumable thread
 ```
 
-**3. Connect a chat client.** Quickest is the hosted client — open [agentchat.vercel.app](https://agentchat.vercel.app) and fill in:
+Then chat: point the agent at `data/synthetic/orders.csv`, describe the business context, and iterate on its proposal. When the agent proposes a contract it pauses at the approval gate and prints the plain-English review; type `approve` to accept (which writes the contract to `contracts/<dataset>.yaml`) or type feedback to have it revise. `--db` keeps the thread on disk so you can stop and resume the same `--thread` later.
 
-- Deployment URL: `http://localhost:2024`
-- Assistant / Graph ID: `scoping`
-- LangSmith API key: leave empty (not needed for a local server)
+**Why the CLI compiles the graph with a checkpointer.** The approval gate is a LangGraph `interrupt()`: it pauses the run by persisting it to a checkpointer (keyed by `thread_id`) and resumes by looking it back up. Without a checkpointer the gate can never complete and no contract is produced — so the driver passes one in (`MemorySaver` by default, `SqliteSaver` with `--db`). On `main`, the `langgraph dev` server supplied this implicitly; here the driver owns it.
 
-Or run the UI locally instead:
-
-```bash
-git clone https://github.com/langchain-ai/agent-chat-ui.git
-cd agent-chat-ui
-pnpm install && pnpm dev   # then open http://localhost:3000 and enter the same values
-```
-
-Then chat: point the agent at `data/synthetic/orders.csv`, describe the business context, and iterate on its proposal. When you confirm, the approval gate renders as an interrupt card (approve / edit / reject); approving writes the approved contract to `contracts/<dataset>.yaml`.
-
-> **Free-tier rate limits:** a single scoping turn makes several model requests (the agent loop calls the model once per tool round), so Gemini's free-tier requests-per-minute cap is easy to hit mid-conversation. The default `gemini-3.1-flash-lite` is chosen partly for its higher free-tier allowance; if you still see 429s, wait a minute and continue (the thread keeps its state), or switch `DQ_AGENT_MODEL` to another model.
-
-The approval interrupt follows agent-chat-ui's HITL schema (`action_requests` + `review_configs`, tracking the current agent-chat-ui `main`), so the UI renders the contract review (approve / edit / reject) natively instead of as raw JSON. If you connect a client still on the older `HumanInterrupt` schema and see the raw interrupt payload, type `approve` (or your feedback) as free text — the gate accepts a text response as well as the rendered controls.
+The approval interrupt uses the project's own HITL contract (`action_requests` + `review_configs`); `scoping.py:_decision()` normalizes the resume payload, including a free-text reply, so a plain terminal can drive the gate without rendered buttons. A future Streamlit panel consumes the exact same interrupt/resume contract.
 
 ## Project structure
 
@@ -292,7 +271,7 @@ Install the optional dependency groups you need:
 | `uv sync`                  | core: Polars, Pydantic, PyYAML                          |
 | `uv sync --extra dev`      | pytest, pytest-cov                                      |
 | `uv sync --extra postgres` | ConnectorX (Postgres connector)                         |
-| `uv sync --extra agents`   | LangGraph + LangChain (the scoping agent + chat server) |
+| `uv sync --extra agents`   | LangGraph + LangChain + SQLite checkpointer (the scoping agent + CLI driver) |
 
 Run the suite:
 

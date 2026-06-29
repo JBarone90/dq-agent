@@ -24,7 +24,7 @@ RUNNING THE INTEGRATION TEST  (opt-in, requires a live LLM)
 ------------------------------------------------------------
 Set DQ_AGENT_MODEL to any LangChain model string and run the integration marker:
 
-    DQ_AGENT_MODEL=google_genai:gemini-3.1-flash-lite uv run pytest -m integration -v
+    DQ_AGENT_MODEL=eu.anthropic.claude-sonnet-4-6 uv run pytest -m integration -v
 
 The integration test drives the scoping agent through a full session, extracts
 the draft contract it produces, and asserts recall == 1.0 (every known issue
@@ -304,7 +304,7 @@ def test_scoping_agent_explicit_instructions(
     to a tool-schema or registry problem, not a system-prompt problem.
 
     Run with:
-        DQ_AGENT_MODEL=google_genai:gemini-3.1-flash-lite uv run pytest -m integration -s -v
+        DQ_AGENT_MODEL=eu.anthropic.claude-sonnet-4-6 uv run pytest -m integration -s -v
     """
     graph = _integration_graph(registry, tmp_path)
     csv_path = str(synthetic_data_path / "orders.csv")
@@ -346,7 +346,7 @@ def test_scoping_agent_discovers_issues_from_profile(
     checks make sense. A failure here points to the system prompt or model capability.
 
     Run with:
-        DQ_AGENT_MODEL=google_genai:gemini-3.1-flash-lite uv run pytest -m integration -s -v
+        DQ_AGENT_MODEL=eu.anthropic.claude-sonnet-4-6 uv run pytest -m integration -s -v
     """
     graph = _integration_graph(registry, tmp_path)
     csv_path = str(synthetic_data_path / "orders.csv")

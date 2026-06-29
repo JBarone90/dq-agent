@@ -98,7 +98,7 @@ _Single-agent first, sub-agent split only if it earns its complexity._
       covers this; promote to sub-agents only if complexity demands it
 - [x] Human approval gate: present proposed contract, user can accept, reject individual
       rules, or override parameters before finalizing — LangGraph `interrupt()` in the
-      `approval` node, agent-chat-ui HITL schema (approve / edit / reject)
+      `approval` node, project HITL schema (approve / edit / reject)
 - [x] Persist approved contract as a canonical YAML artifact independent of the agent
       — approval stamps `approved_at`/`approved_by` and writes `contracts/<dataset>.yaml`
 - [x] Enforce approval in the engine (deferred from Phase 1): `run()` refuses contracts
@@ -130,13 +130,15 @@ _Single-agent first, sub-agent split only if it earns its complexity._
       through to `profiler.profile` so a sampled report is flagged honestly. The sampling
       parameters are deterministic tool config, not LLM-chosen arguments — the model only
       supplies the locator. Files keep their current full-load path (local, no transfer cost)
-- [ ] Minimal web UI as localhost demo: use [agent-chat-ui](https://github.com/langchain-ai/agent-chat-ui)
-      instead of building a custom front end. It is LangChain's off-the-shelf chat client for
-      LangGraph servers: serve the scoping graph with `langgraph dev`, point agent-chat-ui at
-      it, and the chat panel comes for free. The approval gate maps to a LangGraph
-      `interrupt()` — agent-chat-ui renders human-in-the-loop interrupts (accept / edit /
-      respond) natively, so the contract review screen is the interrupt payload, not custom UI.
-      Auth, deployment, and multi-user are explicitly deferred (decide with IT later)
+- [x] Terminal driver for the scoping conversation: `scripts/scoping_cli.py` runs the graph
+      in-process, supplies its own checkpointer, and handles the full converse + approval loop
+      (distinguishing a normal turn from a pending `interrupt()` by checking `__interrupt__`).
+      This is the air-gapped replacement for a chat server — see the 2026-06-29 design entry
+- [ ] Optional Streamlit chat panel for non-technical owners: same in-process graph +
+      checkpointer pattern as the CLI, npm-free (Streamlit's frontend ships in its wheel), so
+      it works behind the no-npm mirror. The approval gate becomes inline approve/edit/reject
+      controls reading the same interrupt/resume contract. Auth, deployment, and multi-user
+      are explicitly deferred (decide with IT later)
 
 **Exit criteria:** user points at a dataset, describes its business context, receives a proposed
 rule contract, approves it, and a YAML contract file is produced that the Phase 1 engine can
@@ -247,13 +249,27 @@ lifecycle event, not a per-rule runtime error.
 localhost demo first. Authentication, deployment, and multi-user support are deliberately
 deferred until the demo proves the workflow and IT can be involved.
 
-**Interface implementation (2026-06-12).** The demo UI is agent-chat-ui rather than a
-custom build. Consequences for Phase 3 design: the scoping agent must be exposed as a
-LangGraph Server graph (`langgraph.json` + `langgraph dev`), and the human approval gate
-must be implemented as a LangGraph `interrupt()` whose payload follows agent-chat-ui's
-HITL schema (`action_requests` + `review_configs`), so the UI can render approve/edit/reject
-controls without custom front-end work. If the demo later needs a bespoke contract-review screen, that is
-an additive replacement — the graph and interrupt contract stay the same.
+**Interface implementation (2026-06-12).** _(Superseded on `feat/bedrock-proxy-adapter` — see
+the 2026-06-29 entry below.)_ The demo UI is agent-chat-ui rather than a custom build.
+Consequences for Phase 3 design: the scoping agent must be exposed as a LangGraph Server graph
+(`langgraph.json` + `langgraph dev`), and the human approval gate must be implemented as a
+LangGraph `interrupt()` whose payload follows the off-the-shelf HITL schema (`action_requests`
++ `review_configs`), so the UI can render approve/edit/reject controls without custom front-end
+work. If the demo later needs a bespoke contract-review screen, that is an additive replacement
+— the graph and interrupt contract stay the same.
+
+**Interface implementation, branch revision (2026-06-29, `feat/bedrock-proxy-adapter`).** The
+work environment is air-gapped with **no npm mirror**, so agent-chat-ui (and any Node-based UI)
+is not installable, and the `langgraph dev` server it depends on is dropped. The interface is a
+**local, in-process driver** instead: a terminal CLI (`scripts/scoping_cli.py`) today, with an
+optional **Streamlit** chat panel for non-technical owners (Streamlit ships its frontend inside
+the Python wheel — no Node). The graph and the `interrupt()` HITL contract are unchanged — only
+the consumer changed — so this is exactly the "additive replacement" the 2026-06-12 entry
+anticipated. **Load-bearing consequence:** the `langgraph dev` server used to provide the
+checkpointer implicitly; an in-process driver must compile the graph with its own
+(`build_graph(checkpointer=...)`) or the `interrupt()` approval gate cannot pause/resume and no
+contract is produced. `MemorySaver` for an ephemeral run, `SqliteSaver` (`langgraph-checkpoint-
+sqlite`) for a resumable one.
 
 ---
 
@@ -265,11 +281,11 @@ an additive replacement — the graph and interrupt contract stay the same.
 | Package manager      | uv                 | Fast, reproducible                                                                   |
 | Orchestration        | LangGraph          | Native support for multi-agent + human-in-the-loop                                   |
 | LLM binding          | LangChain core     | Provider-agnostic interface                                                          |
-| Dev/demo LLM         | Gemini 3.1 Flash Lite | Free tier (high daily allowance), solid tool calling; swap via `DQ_AGENT_MODEL` (Ollama for fully local) |
+| Dev/demo LLM         | Bedrock proxy (`DeptBedrockChat`) | Air-gapped default on this branch: Anthropic-on-Bedrock via the internal `dwutils.bedrock` proxy; `DQ_AGENT_MODEL` picks the Bedrock model id (`main` uses Gemini free tier) |
 | Data layer           | Polars             | Fast, memory-efficient, clean API; consistent interface across CSV and DB connectors |
 | DB connector         | ConnectorX or ADBC | Polars-native Postgres ingestion                                                     |
 | Rule/contract format | YAML               | Human-readable, diffable, versionable                                                |
-| Chat UI (demo)       | agent-chat-ui      | Off-the-shelf chat client for LangGraph servers; renders approval interrupts natively |
+| Scoping interface    | CLI + Streamlit    | Air-gapped/no-npm: in-process driver compiles the graph with its own checkpointer (agent-chat-ui dropped on `feat/bedrock-proxy-adapter`) |
 | Testing              | pytest             | Standard                                                                             |
 
 ---
