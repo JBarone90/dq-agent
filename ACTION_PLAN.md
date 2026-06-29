@@ -134,11 +134,14 @@ _Single-agent first, sub-agent split only if it earns its complexity._
       in-process, supplies its own checkpointer, and handles the full converse + approval loop
       (distinguishing a normal turn from a pending `interrupt()` by checking `__interrupt__`).
       This is the air-gapped replacement for a chat server — see the 2026-06-29 design entry
-- [ ] Optional Streamlit chat panel for non-technical owners: same in-process graph +
-      checkpointer pattern as the CLI, npm-free (Streamlit's frontend ships in its wheel), so
-      it works behind the no-npm mirror. The approval gate becomes inline approve/edit/reject
-      controls reading the same interrupt/resume contract. Auth, deployment, and multi-user
-      are explicitly deferred (decide with IT later)
+- [~] Streamlit chat panel for non-technical owners (`app/scoping_app.py`, `ui` extra):
+      same in-process graph + checkpointer pattern as the CLI, npm-free (Streamlit's frontend
+      ships in its wheel). **Scaffolded:** chat transcript, tool-call visibility with a toggle,
+      and an approve/edit/reject gate (edit exposes the contract YAML) all wired to the real
+      graph. **Pending an adapter change:** token-usage readout (needs `DeptBedrockChat` to
+      surface `usage_metadata`) and token streaming (needs a `_stream` on the adapter +
+      streaming support in the proxy). Auth, deployment, and multi-user are explicitly
+      deferred (decide with IT later)
 
 **Exit criteria:** user points at a dataset, describes its business context, receives a proposed
 rule contract, approves it, and a YAML contract file is produced that the Phase 1 engine can

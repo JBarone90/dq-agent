@@ -142,7 +142,15 @@ Then chat: point the agent at `data/synthetic/orders.csv`, describe the business
 
 **Why the CLI compiles the graph with a checkpointer.** The approval gate is a LangGraph `interrupt()`: it pauses the run by persisting it to a checkpointer (keyed by `thread_id`) and resumes by looking it back up. Without a checkpointer the gate can never complete and no contract is produced — so the driver passes one in (`MemorySaver` by default, `SqliteSaver` with `--db`). On `main`, the `langgraph dev` server supplied this implicitly; here the driver owns it.
 
-The approval interrupt uses the project's own HITL contract (`action_requests` + `review_configs`); `scoping.py:_decision()` normalizes the resume payload, including a free-text reply, so a plain terminal can drive the gate without rendered buttons. A future Streamlit panel consumes the exact same interrupt/resume contract.
+The approval interrupt uses the project's own HITL contract (`action_requests` + `review_configs`); `scoping.py:_decision()` normalizes the resume payload, including a free-text reply, so a plain terminal can drive the gate without rendered buttons.
+
+**3. Or run the visual chat panel (Streamlit), for non-technical owners.** Same in-process graph and interrupt/resume contract as the CLI, rendered as a chat UI — npm-free (Streamlit's frontend ships inside its Python wheel):
+
+```bash
+uv run --extra ui streamlit run app/scoping_app.py
+```
+
+It shows the conversation with a toggle to reveal the agent's tool calls, and renders the approval gate as approve / edit / reject controls (edit lets the owner amend the contract YAML before approving). Token-usage and streaming readouts are scaffolded but inert until the Bedrock adapter surfaces usage and a `_stream` (see `DeptBedrockChat`).
 
 ## Project structure
 

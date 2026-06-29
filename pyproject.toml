@@ -29,6 +29,9 @@ agents = [
     # listed here — it is expected to be importable in the work environment.
     # langchain-google-genai is dropped (no Gemini path on this branch).
 ]
+ui = [
+    "streamlit>=1.40",  # chat panel for the scoping agent (app/scoping_app.py); npm-free
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
