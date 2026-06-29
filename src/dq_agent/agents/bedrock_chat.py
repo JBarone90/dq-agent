@@ -122,6 +122,23 @@ def _usage_metadata(usage: dict[str, Any] | None) -> dict[str, int] | None:
     }
 
 
+def _cost_usd(data: dict[str, Any]) -> float | None:
+    """Per-call cost when the proxy enriches the response with it, else None.
+
+    The raw Anthropic body carries tokens only — `dwutils.bedrock` is the pricing
+    source (this deliberately does NOT hardcode a price table, which would drift and
+    ignore the org's negotiated Bedrock rates). The exact field the proxy uses is not
+    yet pinned, so this checks the likely shapes; returns None when absent so the UI
+    shows nothing rather than a wrong number. Confirm with
+    `inspect.getsource(dwutils.bedrock.invoke)` and tighten to the real key."""
+    usage = data.get("usage") or {}
+    for value in (data.get("cost"), data.get("cost_usd"),
+                  usage.get("cost"), usage.get("cost_usd")):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
 class DeptBedrockChat(BaseChatModel):
     """Chat model that calls Bedrock (Claude) through the internal bedrock-proxy.
 
@@ -136,9 +153,11 @@ class DeptBedrockChat(BaseChatModel):
       `_astream`, so a high-concurrency web UI blocks a worker thread per call.
     - **No streaming.** `_stream` is unimplemented — a full response is returned at
       once, so a UI cannot render tokens as they are produced.
-    - **Usage is surfaced but unpriced.** Token counts from the response `usage`
-      block are mapped onto `AIMessage.usage_metadata` (see `_usage_metadata`), but
-      there is no cost/$ translation and cache-read/-write token fields are not
+    - **Usage and (when the proxy provides it) cost are surfaced.** Token counts from
+      the response `usage` block map onto `AIMessage.usage_metadata`; a per-call cost
+      is read from the response when present and stashed in
+      `response_metadata["cost_usd"]` (see `_cost_usd` — no hardcoded price table;
+      `dwutils.bedrock` is the pricing source). Cache-read/-write token fields are not
       captured.
     - **Minimal error handling.** A proxy/HTTP error or a malformed response body
       surfaces raw, not as a typed, retryable error.
@@ -191,11 +210,16 @@ class DeptBedrockChat(BaseChatModel):
                     "type": "tool_call",
                 })
 
+        metadata: dict[str, Any] = {"stop_reason": data.get("stop_reason")}
+        cost = _cost_usd(data)
+        if cost is not None:
+            metadata["cost_usd"] = cost
+
         message = AIMessage(
             content=text,
             tool_calls=tool_calls,
             usage_metadata=_usage_metadata(data.get("usage")),
-            response_metadata={"stop_reason": data.get("stop_reason")},
+            response_metadata=metadata,
         )
         return ChatResult(generations=[ChatGeneration(message=message)])
 

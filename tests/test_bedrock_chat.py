@@ -143,6 +143,27 @@ def test_generate_usage_absent_is_none(monkeypatch):
     assert result.usage_metadata is None
 
 
+def test_generate_captures_cost_when_present(monkeypatch):
+    monkeypatch.setattr(
+        bedrock_chat, "_invoke",
+        lambda request: FakeResponse({
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "cost": 0.0034},
+        }),
+    )
+    result = DeptBedrockChat().invoke([HumanMessage("hi")])
+    assert result.response_metadata["cost_usd"] == 0.0034
+
+
+def test_generate_omits_cost_when_absent(monkeypatch):
+    monkeypatch.setattr(
+        bedrock_chat, "_invoke",
+        lambda request: FakeResponse({"content": [{"type": "text", "text": "ok"}]}),
+    )
+    result = DeptBedrockChat().invoke([HumanMessage("hi")])
+    assert "cost_usd" not in result.response_metadata
+
+
 def test_generate_includes_system_when_present(monkeypatch):
     captured = {}
 
