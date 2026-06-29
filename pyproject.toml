@@ -18,11 +18,16 @@ agents = [
     "langchain>=0.3.0",                # init_chat_model: provider is a config string, not code
     "langchain-core>=0.3.0",
     "langgraph>=0.2.0",
-    "langgraph-cli[inmem]>=0.2.0",     # `langgraph dev` serves the graph for agent-chat-ui
-    # NB (feat/bedrock-proxy-adapter): this branch's default model is DeptBedrockChat,
-    # which calls the internal `dwutils.bedrock` proxy. `dwutils` is an internal package,
-    # not on PyPI, so it is NOT listed here — it is expected to be importable in the work
-    # environment. langchain-google-genai is dropped (no Gemini path on this branch).
+    "langgraph-checkpoint-sqlite>=2.0.0",  # durable thread state for the CLI/Streamlit driver
+    # NB (feat/bedrock-proxy-adapter): this branch is air-gapped with no npm mirror, so the
+    # agent-chat-ui demo path is dropped. The interface is a local in-process driver instead:
+    # the CLI in `scripts/scoping_cli.py` (optionally a Streamlit chat panel), each of which
+    # compiles the graph with its own checkpointer. `langgraph-cli` (the `langgraph dev`
+    # server) is therefore not a dependency here.
+    # NB: this branch's default model is DeptBedrockChat, which calls the internal
+    # `dwutils.bedrock` proxy. `dwutils` is an internal package, not on PyPI, so it is NOT
+    # listed here — it is expected to be importable in the work environment.
+    # langchain-google-genai is dropped (no Gemini path on this branch).
 ]
 dev = [
     "pytest>=8.0.0",

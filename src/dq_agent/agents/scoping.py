@@ -3,20 +3,21 @@
 A single LangGraph agent (sub-agent split deferred until it earns its complexity)
 drives the scoping conversation: profile the dataset, discuss findings, query the
 registry, propose a parameterized rule suite, and route it through the human
-approval gate. The approval gate is a LangGraph `interrupt()` whose payload follows
-agent-chat-ui's HITL schema (`action_requests` + `review_configs`), so the UI renders
-approve/edit/reject controls without custom front-end work (see ACTION_PLAN.md).
+approval gate. The approval gate is a LangGraph `interrupt()` whose payload is the
+project's own HITL contract (`action_requests` + `review_configs`), consumed by the
+local driver (a CLI or a Streamlit chat panel) that supplies the resume decision.
 
 The LLM never sees raw cell values (`profiler.redact()`) and never executes rules —
 its only product is a draft contract. Approval stamps `approved_at`/`approved_by` and
 persists the canonical YAML artifact; from there the deterministic engine takes over.
 
-Serve locally for agent-chat-ui with `uv run langgraph dev` (see langgraph.json).
+Drive locally with the CLI in `scripts/scoping_cli.py`. Any driver must compile the
+graph with a checkpointer (see `build_graph(checkpointer=...)`): `interrupt()` cannot
+pause and resume without one.
 """
 
 from __future__ import annotations
 
-import asyncio
 import getpass
 import json
 import os
@@ -195,10 +196,10 @@ _ACCEPT_WORDS = {"accept", "approve", "approved", "yes", "y", "looks good", "go 
 def _decision(response: Any) -> dict[str, Any]:
     """Normalize a resume payload into a single decision dict.
 
-    agent-chat-ui (main) resumes with {"decisions": [decision]} where decision["type"]
-    is approve/edit/reject; a bare list or dict is accepted too. A free-text string —
-    the raw-JSON fallback view, where the owner types instead of clicking — becomes an
-    approve or reject decision so the text and widget paths converge."""
+    The driver resumes with {"decisions": [decision]} where decision["type"] is
+    approve/edit/reject; a bare list or dict is accepted too. A free-text string —
+    a CLI that lets the owner type instead of clicking a button — becomes an approve
+    or reject decision so the text and widget paths converge."""
     if isinstance(response, dict) and "decisions" in response:
         decisions = response["decisions"] or [{}]
         response = decisions[0]
@@ -250,9 +251,9 @@ def _approval_node(contracts_dir: Path, registry: Registry):
         description = ("Review the proposed data quality contract:\n\n"
                        + describe_contract(contract, registry)
                        + "\n\nFull definition:\n\n```yaml\n" + contract.to_yaml() + "```")
-        # agent-inbox HITL schema (agent-chat-ui main): isAgentInboxInterruptSchema only
-        # accepts the plural action_requests + review_configs shape, so this renders as
-        # approve/edit/reject controls instead of dumping raw JSON.
+        # HITL interrupt contract: the plural action_requests + review_configs shape.
+        # The local driver reads action_requests[0].description to show the owner and
+        # offers the allowed_decisions (approve/edit/reject) as its resume options.
         response = interrupt({
             "action_requests": [{
                 "name": "approve_contract",
@@ -343,11 +344,3 @@ def build_graph(
     builder.add_conditional_edges("agent", route, ["tools", "approval", END])
     builder.add_edge("tools", "agent")
     return builder.compile(checkpointer=checkpointer)
-
-
-async def make_graph():
-    """Zero-arg factory for LangGraph Server (referenced from langgraph.json);
-    the server injects its own checkpointer. Async because the server invokes
-    factories on its event loop, and build_graph does blocking work (registry
-    directory scan, model init) that must run on a worker thread."""
-    return await asyncio.to_thread(build_graph)
