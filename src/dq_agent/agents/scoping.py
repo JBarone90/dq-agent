@@ -133,25 +133,18 @@ def _make_tools(registry: Registry) -> list:
                 ToolMessage(f"error: {exc}", tool_call_id=tool_call_id)
             ]})
 
-        report = profiler.redact(
-            profiler.profile(load.df, dataset=table, sampled=load.sampled)
-        )
-        if load.sampled:
-            est = (
-                f"{load.estimated_rows:,}" if load.estimated_rows is not None
-                else "an unknown number of"
-            )
-            note = (
-                f"Profiled a block-level sample of ~{len(load.df):,} rows from {est} "
-                "rows; counts, uniqueness and ranges are estimates. "
-            )
-        else:
-            note = f"Profiled the full table ({len(load.df):,} rows). "
+        # Same output shape as profile_dataset: the redacted report as pure JSON. The
+        # sample's provenance (sampled flag + full-table estimate) lives in the report
+        # itself, so no prose note is needed and every consumer parses one shape.
+        report = profiler.redact(profiler.profile(
+            load.df, dataset=table, sampled=load.sampled,
+            estimated_total_rows=load.estimated_rows if load.sampled else None,
+        ))
         return Command(update={
             "profile": report.model_dump(mode="json"),
             "source_table": table,
             "draft": None,
-            "messages": [ToolMessage(note + report.model_dump_json(exclude_none=True),
+            "messages": [ToolMessage(report.model_dump_json(exclude_none=True),
                                      tool_call_id=tool_call_id)],
         })
 

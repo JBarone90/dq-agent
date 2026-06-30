@@ -65,6 +65,11 @@ class TableProfile(BaseModel):
     # not extrapolate from a sample, so it would be actively misleading as a count
     duplicate_row_count: int | None
     schema_fingerprint: str
+    # full-table size when profiled from a sample (row_count is then the sample size,
+    # not the table's). None for a full load or a local file. The profiler does not
+    # measure this — the connector supplies the planner estimate and it rides along as
+    # provenance, so a sampled report is self-describing without a prose note.
+    estimated_total_rows: int | None = None
 
 
 class ProfileReport(BaseModel):
@@ -84,6 +89,7 @@ def profile(
     *,
     profiled_at: datetime | None = None,
     sampled: bool = False,
+    estimated_total_rows: int | None = None,
     hint_sample_rows: int | None = None,
 ) -> ProfileReport:
     """Profile a DataFrame into a structured report.
@@ -91,6 +97,9 @@ def profile(
     `sampled` marks that `df` is a sample of a larger table (e.g. from a connector
     with `sample_rows`): the report is flagged so consumers treat its statistics as
     estimates, and `duplicate_row_count` is dropped since surplus does not extrapolate.
+    `estimated_total_rows` is the connector's full-table size estimate, carried through
+    onto `table.estimated_total_rows` so a sampled report records the population it came
+    from; pass it only alongside `sampled`.
 
     `hint_sample_rows` is a separate, finer scale hook: when set and the table is
     taller, the per-value passes (semantic hints, string-type inference) run on a
@@ -111,6 +120,7 @@ def profile(
                 None if sampled else (row_count - df.unique().height if row_count else 0)
             ),
             schema_fingerprint=_schema_fingerprint(df),
+            estimated_total_rows=estimated_total_rows,
         ),
         columns=[
             _profile_column(df[name], row_count, hint_df[name]) for name in df.columns

@@ -2,6 +2,8 @@
 interrupt, contract persistence) is exercised with a scripted fake model — no LLM
 calls anywhere in the suite."""
 
+import json
+
 import pytest
 
 pytest.importorskip("langgraph")
@@ -139,8 +141,11 @@ def test_profile_table_flags_sampled_report(tools, orders_df, monkeypatch):
     assert profile["sampled"] is True
     # surplus does not extrapolate from a sample, so the profiler drops it
     assert profile["table"]["duplicate_row_count"] is None
+    # the full-table estimate rides in the report itself, not a prose note
+    assert profile["table"]["estimated_total_rows"] == 5_000_000
     assert command.update["source_table"] == "public.orders"
-    assert "sample" in command.update["messages"][0].content.lower()
+    # same output shape as profile_dataset: the message is the report as pure JSON
+    assert json.loads(command.update["messages"][0].content)["sampled"] is True
 
 
 def test_profile_table_full_load_not_sampled(tools, orders_df, monkeypatch):
@@ -149,7 +154,9 @@ def test_profile_table_full_load_not_sampled(tools, orders_df, monkeypatch):
         _tool_call("profile_table", {"table": "public.orders"})
     )
     assert command.update["profile"]["sampled"] is False
-    assert "full table" in command.update["messages"][0].content
+    # a full load is authoritative: no population estimate carried
+    assert command.update["profile"]["table"]["estimated_total_rows"] is None
+    assert json.loads(command.update["messages"][0].content)["sampled"] is False
 
 
 def test_profile_table_surfaces_connector_error(tools, monkeypatch):

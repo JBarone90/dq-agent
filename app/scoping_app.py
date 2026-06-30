@@ -157,20 +157,14 @@ def _daily_usage() -> dict[str, str] | None:
 
 
 def _as_profile(content: str) -> dict[str, Any] | None:
-    """If a tool result is a profiler report, return it parsed, else None. profile_table
-    prefixes a human note before the JSON, so retry from the first brace if the whole
-    string does not parse."""
-    candidates = [content]
-    brace = content.find("{")
-    if brace > 0:
-        candidates.append(content[brace:])
-    for candidate in candidates:
-        try:
-            data = json.loads(candidate)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if isinstance(data, dict) and "columns" in data and "dataset" in data:
-            return data
+    """If a tool result is a profiler report, return it parsed, else None. Both profile
+    tools emit the report as pure JSON, so a single parse suffices."""
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(data, dict) and "columns" in data and "dataset" in data:
+        return data
     return None
 
 
@@ -193,7 +187,11 @@ def _render_profile(report: dict[str, Any]) -> None:
     ]
     st.dataframe(rows, use_container_width=True, hide_index=True)
     if report.get("sampled"):
-        st.caption(f"sample of {report['table']['row_count']:,} rows — statistics are estimates")
+        est = report["table"].get("estimated_total_rows")
+        of = f" of an estimated {est:,}" if est else ""
+        st.caption(
+            f"sample of {report['table']['row_count']:,} rows{of} — statistics are estimates"
+        )
     else:
         st.caption(f"{report['table']['row_count']:,} rows")
 

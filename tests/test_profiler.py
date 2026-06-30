@@ -167,6 +167,15 @@ def test_unsampled_report_is_not_flagged(orders_df):
     report = profile(orders_df, dataset="orders")
     assert report.sampled is False
     assert report.table.duplicate_row_count == 0
+    assert report.table.estimated_total_rows is None
+
+
+def test_estimated_total_rows_is_carried_onto_the_report(orders_df):
+    # the connector's full-table estimate rides through as provenance; row_count stays
+    # the sample size, so a sampled report records the population it came from
+    report = profile(orders_df, dataset="orders", sampled=True, estimated_total_rows=5_000_000)
+    assert report.table.row_count == TOTAL_ROWS
+    assert report.table.estimated_total_rows == 5_000_000
 
 
 # --- string-type inference (columns stored as text) ---
