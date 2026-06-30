@@ -32,6 +32,8 @@ DeptBedrockChat limitations docstring).
 from __future__ import annotations
 
 import json
+import os
+import re
 import sqlite3
 import uuid
 from pathlib import Path
@@ -45,7 +47,13 @@ from langgraph.types import Command
 
 from dq_agent.agents.bedrock_chat import BedrockProxyError
 from dq_agent.agents.scoping import build_graph
+from dq_agent.connectors import DEFAULT_DSN_ENV
 from dq_agent.models import Contract
+
+# Mirrors the connector's identifier check for a client-side hint (schema-qualified or
+# bare); the connector still validates authoritatively when the tool runs.
+_TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$")
+_FILE_SUFFIXES = {".csv", ".parquet"}
 
 st.set_page_config(page_title="dq-agent · scoping", page_icon="🧪", layout="centered")
 
@@ -359,6 +367,53 @@ def _sidebar(result: dict[str, Any] | None) -> bool:
     return show_tools
 
 
+def _validate_path(path: str) -> tuple[bool, str]:
+    """Client-side check for a file locator: a hint, not the authority (load_csv /
+    load_parquet still validate). Empty input is 'not yet valid' with no scolding."""
+    if not path:
+        return False, ""
+    p = Path(path)
+    if p.suffix.lower() not in _FILE_SUFFIXES:
+        return False, "Path must end in .csv or .parquet."
+    if not p.exists():
+        return False, "No file at that path (relative to where the app runs)."
+    return True, ""
+
+
+def _source_entry() -> None:
+    """First-turn onboarding: help the owner enter a valid locator before any model
+    call. Shown only before a conversation exists; the chat box below stays an escape
+    hatch. Validation is client-side so a typo is caught without a model round-trip —
+    the profile tools validate authoritatively when they run."""
+    st.subheader("Start by choosing a dataset")
+    kind = st.radio(
+        "Source", ["File (CSV / Parquet)", "Postgres table"],
+        horizontal=True, label_visibility="collapsed",
+    )
+    if kind.startswith("File"):
+        path = st.text_input(
+            "File path", placeholder="data/synthetic/orders.csv",
+            help="A CSV or Parquet file readable by the app.",
+        ).strip()
+        valid, message = _validate_path(path)
+        first_message = f"Please scope the dataset at {path}"
+    else:
+        if not os.environ.get(DEFAULT_DSN_ENV):
+            st.info(f"Set `{DEFAULT_DSN_ENV}` in the environment to scope a database table.")
+        table = st.text_input(
+            "Table", placeholder="public.orders",
+            help="Schema-qualified name, e.g. public.orders.",
+        ).strip()
+        valid = bool(_TABLE_RE.match(table))
+        message = "" if valid or not table else "Use the form schema.table, e.g. public.orders."
+        first_message = f"Please scope the Postgres table {table}"
+
+    if message:
+        st.caption(f"⚠️ {message}")
+    if st.button("Scope this", type="primary", disabled=not valid):
+        _invoke({"messages": [{"role": "user", "content": first_message}]})
+
+
 def main() -> None:
     _init_state()
     result = st.session_state.result
@@ -393,6 +448,8 @@ def main() -> None:
         _render_gate(payload, (result or {}).get("profile"))
         return
 
+    if result is None:
+        _source_entry()  # guided first-turn locator; chat below stays the escape hatch
     prompt = st.chat_input("Message the scoping agent…")
     if prompt:
         _invoke({"messages": [{"role": "user", "content": prompt}]})
