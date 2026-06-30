@@ -44,3 +44,6 @@ data/**/*.json
 # contracts the scoping agent approves at runtime are local artifacts
 /contracts/*.yaml
 !/contracts/examples/
+
+# Personal notes — local concept reference, not part of the codebase
+agentic_concepts.md

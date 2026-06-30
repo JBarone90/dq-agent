@@ -42,11 +42,19 @@ from dq_agent.report import describe_contract
 DEFAULT_RULES_DIR = Path("registry/rules")
 DEFAULT_CONTRACTS_DIR = Path("contracts")
 
+# Deterministic profiling cap: the code, not the LLM, decides how much to pull. Tables
+# under this load whole; larger ones come back as a block-level sample (flagged sampled).
+PROFILE_MAX_ROWS = 200_000
+
 SYSTEM_PROMPT = (Path(__file__).parent / "scoping_prompt.txt").read_text()
 
 
 class ScopingState(MessagesState):
     profile: dict[str, Any] | None  # redacted profile report of the dataset under scoping
+    # the Postgres table the profile came from, or None for a local file. Set so the
+    # propose step can confirm range bounds against the live table when the profile is
+    # a sample; never holds a connection string (the DSN is re-resolved from the env).
+    source_table: str | None
     draft: dict[str, Any] | None  # unapproved contract awaiting the approval gate
     contract_path: str | None  # set once the approved YAML artifact is persisted
 
@@ -100,8 +108,51 @@ def _make_tools(registry: Registry) -> list:
         report_json = report.model_dump_json(exclude_none=True)
         return Command(update={
             "profile": report.model_dump(mode="json"),
+            "source_table": None,  # a local file: nothing to confirm bounds against
             "draft": None,  # a new dataset invalidates any pending draft
             "messages": [ToolMessage(report_json, tool_call_id=tool_call_id)],
+        })
+
+    @tool
+    def profile_table(
+        table: str, tool_call_id: Annotated[str, InjectedToolCallId]
+    ) -> Command:
+        """Profile a Postgres table by schema-qualified name ('schema.table'). Loads
+        adaptively: a small table whole, a large one as a representative block-level
+        sample — the report is then flagged `sampled: true` and its counts, uniqueness
+        and ranges are estimates. The connection is read from the environment, never
+        from you: supply only the table name. Returns the same redacted report as
+        profile_dataset."""
+        try:
+            uri = connectors.resolve_dsn()
+            load = connectors.load_postgres_profiling(
+                uri, table=table, max_rows=PROFILE_MAX_ROWS
+            )
+        except (KeyError, ValueError, ImportError) as exc:
+            return Command(update={"messages": [
+                ToolMessage(f"error: {exc}", tool_call_id=tool_call_id)
+            ]})
+
+        report = profiler.redact(
+            profiler.profile(load.df, dataset=table, sampled=load.sampled)
+        )
+        if load.sampled:
+            est = (
+                f"{load.estimated_rows:,}" if load.estimated_rows is not None
+                else "an unknown number of"
+            )
+            note = (
+                f"Profiled a block-level sample of ~{len(load.df):,} rows from {est} "
+                "rows; counts, uniqueness and ranges are estimates. "
+            )
+        else:
+            note = f"Profiled the full table ({len(load.df):,} rows). "
+        return Command(update={
+            "profile": report.model_dump(mode="json"),
+            "source_table": table,
+            "draft": None,
+            "messages": [ToolMessage(note + report.model_dump_json(exclude_none=True),
+                                     tool_call_id=tool_call_id)],
         })
 
     @tool
@@ -161,13 +212,17 @@ def _make_tools(registry: Registry) -> list:
             columns={c["name"]: c["dtype"] for c in report["columns"]},
             rules=[ContractRule(**r.model_dump()) for r in rules],
         )
+        message = ("draft recorded. Summarize it for the owner in plain English:\n"
+                   + describe_contract(draft, registry))
+        # A sampled profile's min/max are estimates, so confirm any proposed range bound
+        # against the live table — but only then, and only for the referenced columns.
+        if report.get("sampled") and state.get("source_table"):
+            notes = _confirm_range_bounds(draft.rules, state["source_table"])
+            if notes:
+                message += "\n\nConfirmed range bounds against the full table:\n- " + "\n- ".join(notes)
         return Command(update={
             "draft": draft.model_dump(mode="json"),
-            "messages": [ToolMessage(
-                "draft recorded. Summarize it for the owner in plain English:\n"
-                + describe_contract(draft, registry),
-                tool_call_id=tool_call_id,
-            )],
+            "messages": [ToolMessage(message, tool_call_id=tool_call_id)],
         })
 
     @tool
@@ -177,7 +232,49 @@ def _make_tools(registry: Registry) -> list:
         confirmation first."""
         # never executed: the graph routes this call to the approval node
 
-    return [profile_dataset, list_rules, propose_contract, request_approval]
+    return [profile_dataset, profile_table, list_rules, propose_contract, request_approval]
+
+
+def _confirm_range_bounds(rules: list[ContractRule], table: str) -> list[str]:
+    """Confirm proposed range_check bounds against the full table and flag any that
+    existing rows would already violate. Called only when the profile is a *sample*
+    (observed min/max are estimates) and the source is a Postgres table, so it runs an
+    exact `min/max` query solely for the columns a range_check references — never
+    speculatively, and at most once per column. Returns human-readable notes, empty
+    when every bound checks out."""
+    range_rules = [r for r in rules if r.rule_id == "range_check"]
+    if not range_rules:
+        return []
+    try:
+        uri = connectors.resolve_dsn()
+    except (KeyError, ImportError) as exc:
+        return [f"could not confirm range bounds against the table ({exc})"]
+
+    notes: list[str] = []
+    seen: dict[str, tuple] = {}
+    for rule in range_rules:
+        col = rule.params.get("column")
+        if not col:
+            continue
+        try:
+            if col not in seen:
+                seen[col] = connectors.column_bounds(uri, table, col)
+            lo, hi = seen[col]
+            problems = []
+            proposed_min, proposed_max = rule.params.get("min_val"), rule.params.get("max_val")
+            if proposed_min is not None and lo is not None and lo < proposed_min:
+                problems.append(f"actual min {lo} is below the proposed min_val {proposed_min}")
+            if proposed_max is not None and hi is not None and hi > proposed_max:
+                problems.append(f"actual max {hi} is above the proposed max_val {proposed_max}")
+        except (ValueError, ImportError, TypeError) as exc:
+            notes.append(f"range_check on '{col}': could not confirm bounds ({exc})")
+            continue
+        if problems:
+            notes.append(
+                f"range_check on '{col}': " + "; ".join(problems)
+                + " — existing rows would violate this bound; confirm the real limit with the owner."
+            )
+    return notes
 
 
 def _validate_rules(rules: list[ContractRule], registry: Registry) -> list[str]:

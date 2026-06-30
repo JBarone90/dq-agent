@@ -121,15 +121,20 @@ _Single-agent first, sub-agent split only if it earns its complexity._
       proposal time; `run()` raises `SchemaDriftError` naming what drifted
 - [x] Human-readable run report: deterministic renderer from `list[RuleResult]` to a
       summary a non-technical dataset owner can read
-- [ ] Wire `load_postgres_profiling` into the agent's `profile_dataset` tool so the agent
-      can scope a Postgres table, not just a local file. The tool accepts a table name and
-      reads the connection URI from the environment — never from the LLM, since a URI
-      carries credentials (government-data privacy). Loading is adaptive against a
-      configured `max_rows` cap (`connectors.load_postgres_profiling`): the planner
-      estimate decides full load vs. `TABLESAMPLE`, and the tool passes `sampled=` straight
-      through to `profiler.profile` so a sampled report is flagged honestly. The sampling
-      parameters are deterministic tool config, not LLM-chosen arguments — the model only
-      supplies the locator. Files keep their current full-load path (local, no transfer cost)
+- [x] Wire `load_postgres_profiling` into the agent as a `profile_table` tool so the agent
+      can scope a Postgres table, not just a local file (kept separate from the file-only
+      `profile_dataset` rather than overloading it). The tool accepts a table name and
+      resolves the connection URI from the environment via `connectors.resolve_dsn`
+      (`DATABASE_DSN__datasets_1`, mirroring how `build_graph` resolves `DQ_AGENT_MODEL`) —
+      never from the LLM, since a URI carries credentials (government-data privacy). Loading
+      is adaptive against the deterministic `PROFILE_MAX_ROWS` cap: the planner estimate
+      decides full load vs. `TABLESAMPLE`, and the tool passes `sampled=` straight through to
+      `profiler.profile` so a sampled report is flagged honestly. The model only supplies the
+      locator. Files keep their current full-load path (local, no transfer cost).
+      Sampled-profile guardrails: the prompt steers bounds toward owner-stated domain limits
+      (not observed extremes), and `propose_contract` confirms a proposed `range_check`
+      against the live table with an exact `connectors.column_bounds` query — but only when
+      the profile is sampled *and* a range_check references a column, so no wasted compute.
 - [x] Terminal driver for the scoping conversation: `scripts/scoping_cli.py` runs the graph
       in-process, supplies its own checkpointer, and handles the full converse + approval loop
       (distinguishing a normal turn from a pending `interrupt()` by checking `__interrupt__`).

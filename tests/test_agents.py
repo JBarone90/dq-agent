@@ -11,7 +11,9 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
+import dq_agent.connectors as connectors
 from dq_agent.agents.scoping import ProposedRule, _make_tools, build_graph
+from dq_agent.connectors import ProfilingLoad
 from dq_agent.engine import run
 from dq_agent.models import Contract
 
@@ -106,6 +108,111 @@ def test_propose_contract_records_unapproved_draft(tools, synthetic_data_path, o
     assert draft.rules[0].severity == "warning"
     # schema snapshot comes from the profile, so the engine's drift check will hold
     assert draft.columns == {name: str(dtype) for name, dtype in orders_df.schema.items()}
+
+
+# --- postgres profiling + gated bounds confirmation ----------------------
+
+
+def _mock_pg(monkeypatch, df, *, sampled, estimated_rows, bounds=(0, 0), bounds_spy=None):
+    """Stub the Postgres path: no live DB. `bounds_spy` records every column
+    column_bounds is asked about, so a test can assert it ran only when it should."""
+    monkeypatch.setattr(connectors, "resolve_dsn", lambda *a, **k: "postgresql://x/y")
+    monkeypatch.setattr(
+        connectors, "load_postgres_profiling",
+        lambda *a, **k: ProfilingLoad(df, sampled, estimated_rows),
+    )
+
+    def fake_bounds(uri, table, column):
+        if bounds_spy is not None:
+            bounds_spy.append(column)
+        return bounds
+
+    monkeypatch.setattr(connectors, "column_bounds", fake_bounds)
+
+
+def test_profile_table_flags_sampled_report(tools, orders_df, monkeypatch):
+    _mock_pg(monkeypatch, orders_df, sampled=True, estimated_rows=5_000_000)
+    command = tools["profile_table"].invoke(
+        _tool_call("profile_table", {"table": "public.orders"})
+    )
+    profile = command.update["profile"]
+    assert profile["sampled"] is True
+    # surplus does not extrapolate from a sample, so the profiler drops it
+    assert profile["table"]["duplicate_row_count"] is None
+    assert command.update["source_table"] == "public.orders"
+    assert "sample" in command.update["messages"][0].content.lower()
+
+
+def test_profile_table_full_load_not_sampled(tools, orders_df, monkeypatch):
+    _mock_pg(monkeypatch, orders_df, sampled=False, estimated_rows=20)
+    command = tools["profile_table"].invoke(
+        _tool_call("profile_table", {"table": "public.orders"})
+    )
+    assert command.update["profile"]["sampled"] is False
+    assert "full table" in command.update["messages"][0].content
+
+
+def test_profile_table_surfaces_connector_error(tools, monkeypatch):
+    def boom(*a, **k):
+        raise KeyError("DATABASE_DSN__datasets_1")
+
+    monkeypatch.setattr(connectors, "resolve_dsn", boom)
+    command = tools["profile_table"].invoke(
+        _tool_call("profile_table", {"table": "public.orders"})
+    )
+    assert "error" in command.update["messages"][0].content
+    assert "profile" not in command.update  # nothing recorded on failure
+
+
+def test_propose_contract_confirms_bounds_when_sampled(tools, orders_df, monkeypatch):
+    spy = []
+    _mock_pg(monkeypatch, orders_df, sampled=True, estimated_rows=5_000_000,
+             bounds=(-200, 99999), bounds_spy=spy)
+    profiled = tools["profile_table"].invoke(
+        _tool_call("profile_table", {"table": "public.orders"})
+    )
+    command = tools["propose_contract"].invoke(_tool_call(
+        "propose_contract",
+        {"rules": [{"rule_id": "range_check",
+                    "params": {"column": "amount", "min_val": 0, "max_val": 5000}}],
+         "state": {"profile": profiled.update["profile"], "source_table": "public.orders"}},
+    ))
+    assert spy == ["amount"]  # confirmed exactly the referenced column, once
+    content = command.update["messages"][0].content
+    assert "existing rows would violate" in content
+    assert "99999" in content  # the real max, above the proposed max_val
+
+
+def test_propose_contract_skips_bounds_when_not_sampled(tools, orders_df, monkeypatch):
+    spy = []
+    _mock_pg(monkeypatch, orders_df, sampled=False, estimated_rows=20,
+             bounds=(-200, 99999), bounds_spy=spy)
+    profiled = tools["profile_table"].invoke(
+        _tool_call("profile_table", {"table": "public.orders"})
+    )
+    command = tools["propose_contract"].invoke(_tool_call(
+        "propose_contract",
+        {"rules": [{"rule_id": "range_check",
+                    "params": {"column": "amount", "min_val": 0, "max_val": 5000}}],
+         "state": {"profile": profiled.update["profile"], "source_table": "public.orders"}},
+    ))
+    assert spy == []  # full-load profile: no confirmation query
+    assert "existing rows would violate" not in command.update["messages"][0].content
+
+
+def test_propose_contract_skips_bounds_without_range_check(tools, orders_df, monkeypatch):
+    spy = []
+    _mock_pg(monkeypatch, orders_df, sampled=True, estimated_rows=5_000_000,
+             bounds=(-200, 99999), bounds_spy=spy)
+    profiled = tools["profile_table"].invoke(
+        _tool_call("profile_table", {"table": "public.orders"})
+    )
+    tools["propose_contract"].invoke(_tool_call(
+        "propose_contract",
+        {"rules": [{"rule_id": "null_check", "params": {"column": "order_id"}}],
+         "state": {"profile": profiled.update["profile"], "source_table": "public.orders"}},
+    ))
+    assert spy == []  # no range_check -> nothing to confirm
 
 
 # --- proposed rule param coercion ----------------------------------------

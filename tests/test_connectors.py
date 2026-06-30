@@ -4,11 +4,14 @@ import polars as pl
 import pytest
 
 from dq_agent.connectors import (
+    DEFAULT_DSN_ENV,
+    column_bounds,
     estimate_row_count,
     load_csv,
     load_parquet,
     load_postgres,
     load_postgres_profiling,
+    resolve_dsn,
 )
 from dq_agent.profiler import profile
 from tests.conftest import DATA_DIR, TOTAL_ROWS
@@ -56,6 +59,64 @@ def test_load_postgres_pushes_sample_limit_down(monkeypatch):
 def test_load_postgres_sample_rejects_custom_query():
     with pytest.raises(ValueError, match="sample_rows applies to 'table'"):
         load_postgres("postgresql://localhost/db", query="SELECT 1", sample_rows=100)
+
+
+def test_load_postgres_rejects_non_select_query():
+    with pytest.raises(ValueError, match="read-only SELECT"):
+        load_postgres("postgresql://localhost/db", query="UPDATE orders SET x = 1")
+
+
+def test_load_postgres_rejects_mutating_keyword_in_select():
+    # a SELECT prefix is not enough; a smuggled mutation must still be rejected
+    with pytest.raises(ValueError, match="forbidden"):
+        load_postgres(
+            "postgresql://localhost/db",
+            query="SELECT 1; DROP TABLE orders",
+        )
+
+
+def test_column_bounds_returns_exact_min_max(monkeypatch):
+    captured = {}
+
+    def fake_read(query, uri, engine):
+        captured["query"] = query
+        return pl.DataFrame({"lo": [0], "hi": [4999]})
+
+    monkeypatch.setattr(pl, "read_database_uri", fake_read)
+    lo, hi = column_bounds("postgresql://localhost/db", "public.orders", "amount")
+    assert (lo, hi) == (0, 4999)
+    assert "min(amount)" in captured["query"] and "max(amount)" in captured["query"]
+
+
+def test_column_bounds_rejects_malformed_column():
+    with pytest.raises(ValueError, match="invalid column name"):
+        column_bounds("postgresql://localhost/db", "orders", "amount); DROP TABLE x")
+
+
+# --- DSN resolution from the environment (mirrors the model's DQ_AGENT_MODEL read) ---
+
+def test_resolve_dsn_passes_through_ready_uri(monkeypatch):
+    monkeypatch.setenv(DEFAULT_DSN_ENV, "postgresql://u:p@host:5432/db")
+    assert resolve_dsn() == "postgresql://u:p@host:5432/db"
+
+
+def test_resolve_dsn_raises_when_env_unset(monkeypatch):
+    monkeypatch.delenv(DEFAULT_DSN_ENV, raising=False)
+    with pytest.raises(KeyError, match=DEFAULT_DSN_ENV):
+        resolve_dsn()
+
+
+def test_loader_resolves_uri_from_env_when_omitted(monkeypatch):
+    monkeypatch.setenv(DEFAULT_DSN_ENV, "postgresql://u:p@host:5432/db")
+    captured = {}
+
+    def fake_read(query, uri, engine):
+        captured["uri"] = uri
+        return pl.DataFrame({"a": [1]})
+
+    monkeypatch.setattr(pl, "read_database_uri", fake_read)
+    load_postgres(table="orders")  # no uri -> resolved from env
+    assert captured["uri"] == "postgresql://u:p@host:5432/db"
 
 
 # --- adaptive sizing: planner estimate + TABLESAMPLE ---
