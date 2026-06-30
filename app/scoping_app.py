@@ -157,13 +157,20 @@ def _daily_usage() -> dict[str, str] | None:
 
 
 def _as_profile(content: str) -> dict[str, Any] | None:
-    """If a tool result is a profiler report, return it parsed, else None."""
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if isinstance(data, dict) and "columns" in data and "dataset" in data:
-        return data
+    """If a tool result is a profiler report, return it parsed, else None. profile_table
+    prefixes a human note before the JSON, so retry from the first brace if the whole
+    string does not parse."""
+    candidates = [content]
+    brace = content.find("{")
+    if brace > 0:
+        candidates.append(content[brace:])
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(data, dict) and "columns" in data and "dataset" in data:
+            return data
     return None
 
 
@@ -185,8 +192,10 @@ def _render_profile(report: dict[str, Any]) -> None:
         for col in report["columns"]
     ]
     st.dataframe(rows, use_container_width=True, hide_index=True)
-    sampled = " · sampled" if report.get("sampled") else ""
-    st.caption(f"{report['table']['row_count']} rows{sampled}")
+    if report.get("sampled"):
+        st.caption(f"sample of {report['table']['row_count']:,} rows — statistics are estimates")
+    else:
+        st.caption(f"{report['table']['row_count']:,} rows")
 
 
 def _render_transcript(result: dict[str, Any] | None, show_tools: bool) -> None:
@@ -359,8 +368,9 @@ def main() -> None:
 
     st.title("Scope a data quality contract")
     st.caption(
-        "Point me at a dataset (e.g. `data/synthetic/orders.csv`), describe its "
-        "business context, and I'll propose a contract for your approval."
+        "Point me at a dataset — a CSV/Parquet path (e.g. `data/synthetic/orders.csv`) "
+        "or a Postgres table (e.g. `public.orders`) — describe its business context, "
+        "and I'll propose a contract for your approval."
     )
 
     _render_transcript(result, show_tools)

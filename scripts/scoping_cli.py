@@ -17,8 +17,10 @@ Run (work environment, with the bedrock proxy reachable):
     uv run python scripts/scoping_cli.py
     uv run python scripts/scoping_cli.py --db scoping.sqlite --thread orders-review
 
-Then: point the agent at a dataset (e.g. data/synthetic/orders.csv), describe its
-business context, and iterate. Type 'quit' at any prompt to exit.
+Then: point the agent at a dataset — a CSV/Parquet path (e.g. data/synthetic/orders.csv)
+or a Postgres table by schema-qualified name (e.g. public.orders, connection from
+DATABASE_DSN__datasets_1) — describe its business context, and iterate. Type 'quit' at
+any prompt to exit.
 """
 
 from __future__ import annotations
