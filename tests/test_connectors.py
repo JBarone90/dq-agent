@@ -7,6 +7,7 @@ from dq_agent.connectors import (
     DEFAULT_DSN_ENV,
     column_bounds,
     estimate_row_count,
+    is_valid_table,
     load_csv,
     load_parquet,
     load_postgres,
@@ -41,6 +42,20 @@ def test_load_postgres_requires_exactly_one_source():
 def test_load_postgres_rejects_malformed_table_name():
     with pytest.raises(ValueError, match="invalid table name"):
         load_postgres("postgresql://localhost/db", table="orders; DROP TABLE x")
+
+
+@pytest.mark.parametrize("name,ok", [
+    ("orders", True),            # bare
+    ("public.orders", True),     # schema-qualified
+    ("_t._c", True),             # leading underscores
+    ("", False),
+    ("1orders", False),          # cannot start with a digit
+    ("public.orders.x", False),  # only one level of qualification
+    ("orders; DROP TABLE x", False),
+])
+def test_is_valid_table(name, ok):
+    # the single source of truth shared by the loaders and the UI's client-side check
+    assert is_valid_table(name) is ok
 
 
 def test_load_postgres_pushes_sample_limit_down(monkeypatch):

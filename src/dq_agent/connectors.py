@@ -22,6 +22,14 @@ DEFAULT_DSN_ENV = "DATABASE_DSN__datasets_1"
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$")
 # a single unqualified column name (no schema dot): used by the bounds-confirm query
 _COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def is_valid_table(name: str) -> bool:
+    """Whether `name` is an accepted table locator: an identifier, optionally schema-
+    qualified ("schema.table" or "table"). The single source of truth for that rule —
+    the loaders enforce it before building SQL, and a UI can call it to validate input
+    client-side without duplicating the pattern."""
+    return bool(_IDENTIFIER.match(name))
 # a custom query must be read-only; reject anything that could mutate, even though the
 # agent never supplies raw SQL — this path is reachable programmatically
 _FORBIDDEN_RE = re.compile(
@@ -103,7 +111,7 @@ def load_postgres(
     if (table is None) == (query is None):
         raise ValueError("provide exactly one of 'table' or 'query'")
     if table is not None:
-        if not _IDENTIFIER.match(table):
+        if not is_valid_table(table):
             raise ValueError(f"invalid table name: {table!r}")
         query = f"SELECT * FROM {table}"
         if sample_rows is not None:
@@ -131,7 +139,7 @@ def estimate_row_count(uri: str, table: str) -> int | None:
     which scans. Returns None when the planner has no estimate yet (e.g. a table never
     analyzed reports `reltuples = -1`); callers should then sample defensively rather
     than trust a zero."""
-    if not _IDENTIFIER.match(table):
+    if not is_valid_table(table):
         raise ValueError(f"invalid table name: {table!r}")
     schema, _, name = table.rpartition(".")
     schema = schema or "public"
@@ -202,7 +210,7 @@ def column_bounds(uri: str, table: str, column: str) -> tuple[object, object]:
     forces a full scan). So this is the one to call before locking a range bound on a
     table large enough to have been sampled. Returns ``(None, None)`` for an empty or
     all-null column."""
-    if not _IDENTIFIER.match(table):
+    if not is_valid_table(table):
         raise ValueError(f"invalid table name: {table!r}")
     if not _COLUMN.match(column):
         raise ValueError(f"invalid column name: {column!r}")

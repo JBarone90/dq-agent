@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sqlite3
 import uuid
 from pathlib import Path
@@ -47,12 +46,9 @@ from langgraph.types import Command
 
 from dq_agent.agents.bedrock_chat import BedrockProxyError
 from dq_agent.agents.scoping import build_graph
-from dq_agent.connectors import DEFAULT_DSN_ENV
+from dq_agent.connectors import DEFAULT_DSN_ENV, is_valid_table
 from dq_agent.models import Contract
 
-# Mirrors the connector's identifier check for a client-side hint (schema-qualified or
-# bare); the connector still validates authoritatively when the tool runs.
-_TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$")
 _FILE_SUFFIXES = {".csv", ".parquet"}
 
 st.set_page_config(page_title="dq-agent · scoping", page_icon="🧪", layout="centered")
@@ -404,7 +400,7 @@ def _source_entry() -> None:
             "Table", placeholder="public.orders",
             help="Schema-qualified name, e.g. public.orders.",
         ).strip()
-        valid = bool(_TABLE_RE.match(table))
+        valid = is_valid_table(table)
         message = "" if valid or not table else "Use the form schema.table, e.g. public.orders."
         first_message = f"Please scope the Postgres table {table}"
 
