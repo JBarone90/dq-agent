@@ -73,4 +73,6 @@ This branch targets an **air-gapped work environment** and diverges from `main` 
   - **CLI:** `scripts/scoping_cli.py` (the supported path today).
   - **Visual (for non-coders):** an optional Streamlit chat panel — same in-process graph + checkpointer pattern, npm-free.
 
+**Proxy behaviour lives in `BEDROCK_PROXY.md`.** The Converse wire format, the `simple=False` calling convention, prompt caching, streaming, per-model cache minimums and pricing, and the error shapes - all verified against the live proxy rather than taken from `dwutils` docstrings, which do not cover most of it. Read it before changing `bedrock_chat.py`, and re-run `scripts/explore_bedrock.py` after any proxy upgrade: these facts have changed under us once already.
+
 **Checkpointer is mandatory for any driver.** The approval gate is a LangGraph `interrupt()`; without a checkpointer it cannot pause and resume, so the contract is never produced. On `main` the `langgraph dev` server supplied this implicitly — here each driver must pass one to `build_graph(checkpointer=...)` (`MemorySaver` for an ephemeral session, `SqliteSaver` for a resumable one). A driver loop must also distinguish a normal conversational turn (send a new message) from a pending interrupt (send `Command(resume=...)`) by checking `result.get("__interrupt__")`.
