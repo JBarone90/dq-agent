@@ -129,7 +129,7 @@ The engine enforces the gate at run time: it raises `ContractNotApprovedError` f
 uv sync --extra agents
 ```
 
-The default model is `DeptBedrockChat` (`src/dq_agent/agents/bedrock_chat.py`), which reaches Anthropic-on-Bedrock through the internal `dwutils.bedrock` proxy — no API key, no internet. `dwutils` is an internal package assumed importable in the work environment; set `DQ_AGENT_MODEL` to pick a Bedrock model id (defaults to `eu.anthropic.claude-sonnet-4-6`). The `model` argument to `build_graph` stays injectable, so a different LangChain model can be substituted in tests or off-network experiments without code changes.
+The default model is `DeptBedrockChat` (`src/dq_agent/agents/bedrock_chat.py`), which reaches Anthropic-on-Bedrock through the internal `dwutils.bedrock` proxy — no API key, no internet. `dwutils` is an internal package assumed importable in the work environment; set `DQ_AGENT_MODEL` to pick a Bedrock model id (defaults to `eu.anthropic.claude-sonnet-5`). The `model` argument to `build_graph` stays injectable, so a different LangChain model can be substituted in tests or off-network experiments without code changes.
 
 **2. Run the CLI.** From the repo root:
 

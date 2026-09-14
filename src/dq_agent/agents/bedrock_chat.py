@@ -1,15 +1,21 @@
 """LangChain chat model backed by the in-house bedrock-proxy (`dwutils.bedrock`).
 
 The work environment has no internet and no AWS SigV4 path — Bedrock is reached
-through an internal HTTP proxy (`dwutils.bedrock.invoke`) that forwards an
-Anthropic-on-Bedrock request body verbatim and returns the raw response. This
-module wraps that single call in a `BaseChatModel` so the scoping agent's
-provider-agnostic plumbing (`build_graph(model=...)`, `bind_tools`) works
-unchanged — the LLM stays a swappable config detail, exactly as in CLAUDE.md.
+through an internal HTTP proxy (`dwutils.bedrock.invoke`) that forwards a
+**Bedrock Converse** request body and returns the raw response. This module wraps
+that single call in a `BaseChatModel` so the scoping agent's provider-agnostic
+plumbing (`build_graph(model=...)`, `bind_tools`) works unchanged — the LLM stays
+a swappable config detail, exactly as in CLAUDE.md.
 
 The agent depends on tool calling, so the translation here is the load-bearing
-part: LangChain messages -> Anthropic `messages`/`system`/`tools`, and the
-response's `content` blocks -> text + `tool_calls`.
+part: LangChain messages -> Converse `messages`/`system`/`toolConfig`, and the
+response's `output.message.content` blocks -> text + `tool_calls`.
+
+Wire format (Converse, not the Anthropic Messages shape this adapter first
+targeted): `system` is a list of blocks, every message's `content` is a list of
+blocks with no `"type"` discriminator, decoding params live under
+`inferenceConfig`, tools under `toolConfig`, and the reply arrives nested under
+`output.message.content` with a camelCase `stopReason` and `usage`.
 
 `dwutils` is the internal package and is not importable outside the work
 environment; the import is deferred into `_invoke` so this module loads (and the
@@ -34,43 +40,75 @@ from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
-DEFAULT_MODEL_ID = "eu.anthropic.claude-sonnet-4-6"
-ANTHROPIC_VERSION = "bedrock-2023-05-31"
+DEFAULT_MODEL_ID = "eu.anthropic.claude-sonnet-5"
+DEFAULT_MAX_RETRIES = 3
+"""Attempts per call, including the first — `dwutils.bedrock` does the backoff."""
 
 
 class BedrockProxyError(RuntimeError):
     """A call to the bedrock-proxy failed in a way the caller should act on.
 
-    Exists to replace the confusing exception dwutils surfaces on a proxy error:
-    `dwutils.bedrock.invoke` calls `raise_for_status()` and then, in its handler, does
-    `raise RuntimeError(error.response.json())` — but a proxy error body is usually not
-    JSON (an empty body, or an HTML 401/403/502 page), so `.json()` itself raises a
-    `JSONDecodeError` that *masks* the real HTTP status. We catch that here and raise a
-    message that names the likely cause instead."""
+    `dwutils.bedrock` raises its own `BedrockError` carrying the proxy's message and
+    the HTTP status it came back with. This restates that as one exception type the
+    drivers (`scripts/scoping_cli.py`, `app/scoping_app.py`) can catch without
+    importing `dwutils`, which is not present off-network. `status_code` is carried
+    through so a caller can branch on the cause (403 = budget spent, 400 = the
+    request body was rejected); it is None when the proxy never replied.
+    """
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+_STATUS_HINTS = {
+    400: (
+        "The proxy rejected the request body. Run "
+        "`uv run python scripts/explore_bedrock.py` to check the Converse shape, "
+        "`toolConfig` included, against the live proxy."
+    ),
+    401: "BEDROCK_TOKEN is missing or expired.",
+    403: (
+        "Either the token is not authorised, or the daily budget is spent — that one "
+        "clears at midnight UTC. `dwutils.bedrock.get_usage()` says which."
+    ),
+    404: "The model_id is not available on the proxy.",
+    429: (
+        "Bedrock is throttling and the retries ran out. Try again, or raise "
+        "`max_retries` on the model."
+    ),
+}
 
 
 def _diagnose(request: dict[str, Any], exc: Exception) -> str:
-    """Build an actionable message for a failed proxy call. Names the usual suspects so
-    a reader does not have to decode dwutils' masked `JSONDecodeError`."""
-    return (
-        f"bedrock-proxy call failed ({type(exc).__name__}: {exc}). "
-        "The proxy returned an error before a usable response; dwutils can mask the real "
-        "HTTP status while formatting it. Most likely one of:\n"
-        "  - BEDROCK_TOKEN missing or expired (401/403);\n"
-        f"  - model_id {request.get('model_id')!r} not available on the proxy (run "
-        "`scripts/explore_bedrock.py` to list models);\n"
-        "  - BEDROCK_PROXY_URL wrong or unreachable (timeout/connection error).\n"
-        "Run `uv run python scripts/explore_bedrock.py` to see the live proxy status."
-    )
+    """Build an actionable message for a failed proxy call.
+
+    The proxy's own message leads, since `dwutils.bedrock` now decodes error bodies
+    properly and reports the real HTTP status. We only add a hint for the statuses
+    where the fix is specific to this adapter's configuration.
+    """
+    status = getattr(exc, "status_code", None)
+    lines = [f"bedrock-proxy call failed: {exc}"]
+    hint = _STATUS_HINTS.get(status)
+    if hint:
+        lines.append(hint)
+    elif status is None:
+        lines.append(
+            "The proxy never replied — check BEDROCK_PROXY_URL is set and reachable."
+        )
+    lines.append(f"model_id: {request.get('model_id')!r}")
+    return "\n".join(lines)
 
 
-def _invoke(request: dict[str, Any]) -> Any:
-    """Send one request through the bedrock-proxy and return the raw `Response`.
+def _invoke(request: dict[str, Any], *, max_retries: int = DEFAULT_MAX_RETRIES) -> Any:
+    """Send one Converse request through the bedrock-proxy, returning the raw `Response`.
+
+    `simple=False` is what selects full-request mode; without it `invoke` treats a
+    `request=` dict as a mistake and raises before any call is made. Retries for
+    throttling and dropped connections happen inside `dwutils.bedrock`.
 
     `dwutils` is imported lazily so this module loads without it (e.g. on a dev laptop
-    or in CI); the unit tests monkeypatch this function. Proxy/transport failures are
-    re-raised as `BedrockProxyError` with a diagnostic message — see that class for why
-    the raw exception is unhelpful.
+    or in CI); the unit tests monkeypatch this function.
     """
     try:
         from dwutils import bedrock  # internal package, only present at work
@@ -80,86 +118,110 @@ def _invoke(request: dict[str, Any]) -> Any:
             "environment. To run elsewhere, inject a model: build_graph(model=...)."
         ) from exc
 
-    # JSONDecodeError (the masked case) subclasses RequestException; RuntimeError is what
-    # dwutils raises when the error body *is* JSON. Both mean the same: proxy call failed.
-    from requests.exceptions import RequestException
-
     try:
-        return bedrock.invoke(request=request, show_usage=False)
-    except (RequestException, RuntimeError) as exc:
-        raise BedrockProxyError(_diagnose(request, exc)) from exc
+        return bedrock.invoke(
+            request=request,
+            simple=False,
+            show_usage=False,
+            max_retries=max_retries,
+        )
+    except RuntimeError as exc:
+        # dwutils' BedrockError subclasses RuntimeError and carries `.status_code`.
+        raise BedrockProxyError(
+            _diagnose(request, exc), getattr(exc, "status_code", None)
+        ) from exc
+    except ValueError as exc:
+        # Raised when BEDROCK_PROXY_URL / BEDROCK_TOKEN are unset, and on a request
+        # dwutils considers malformed. Both are configuration problems, not transport.
+        raise BedrockProxyError(f"bedrock-proxy call rejected: {exc}") from exc
 
 
-def _to_anthropic(messages: Sequence[BaseMessage]) -> tuple[str, list[dict[str, Any]]]:
-    """Translate LangChain messages into (system_text, anthropic messages array).
+def _to_converse(
+    messages: Sequence[BaseMessage],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Translate LangChain messages into (system blocks, Converse messages array).
 
-    Consecutive `ToolMessage`s are coalesced into a single user turn: Anthropic
-    requires every `tool_result` answering a parallel tool call to live in one
+    Consecutive `ToolMessage`s are coalesced into a single user turn: Converse
+    requires every `toolResult` answering a parallel tool call to live in one
     message, but LangGraph's ToolNode emits one `ToolMessage` per call.
     """
-    system = ""
+    system: list[dict[str, Any]] = []
     msgs: list[dict[str, Any]] = []
     for message in messages:
         if isinstance(message, SystemMessage):
-            system += message.content + "\n"
+            system.append({"text": message.content})
         elif isinstance(message, HumanMessage):
-            msgs.append({"role": "user", "content": message.content})
+            msgs.append({"role": "user", "content": [{"text": message.content}]})
         elif isinstance(message, AIMessage):
             content: list[dict[str, Any]] = []
             if message.content:
-                content.append({"type": "text", "text": message.content})
+                content.append({"text": message.content})
             for call in message.tool_calls:
                 content.append({
-                    "type": "tool_use",
-                    "id": call["id"],
-                    "name": call["name"],
-                    "input": call["args"],
+                    "toolUse": {
+                        "toolUseId": call["id"],
+                        "name": call["name"],
+                        "input": call["args"],
+                    }
                 })
             msgs.append({"role": "assistant", "content": content})
         elif isinstance(message, ToolMessage):
             block = {
-                "type": "tool_result",
-                "tool_use_id": message.tool_call_id,
-                "content": str(message.content),
+                "toolResult": {
+                    "toolUseId": message.tool_call_id,
+                    "content": [{"text": str(message.content)}],
+                }
             }
-            # merge into the open tool-result turn if the previous message is one
-            if msgs and msgs[-1]["role"] == "user" and isinstance(msgs[-1]["content"], list):
+            # Merge into the open tool-result turn if the previous message is one.
+            # Every user turn is a list of blocks under Converse, so the test has to
+            # be "does it hold tool results", not "is the content a list".
+            if msgs and _is_tool_result_turn(msgs[-1]):
                 msgs[-1]["content"].append(block)
             else:
                 msgs.append({"role": "user", "content": [block]})
         else:
             raise TypeError(f"unsupported message type: {type(message).__name__}")
-    return system.strip(), msgs
+    return system, msgs
 
 
-def _to_anthropic_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
-    """Convert LangChain tools to Anthropic tool specs (name/description/input_schema)."""
+def _is_tool_result_turn(message: dict[str, Any]) -> bool:
+    """True if `message` is a user turn already carrying tool results."""
+    return message["role"] == "user" and any(
+        "toolResult" in block for block in message["content"]
+    )
+
+
+def _to_converse_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
+    """Convert LangChain tools to Converse tool specs (`toolSpec` with a JSON schema)."""
     specs = []
     for tool in tools:
         fn = convert_to_openai_tool(tool)["function"]
         specs.append({
-            "name": fn["name"],
-            "description": fn.get("description", ""),
-            "input_schema": fn["parameters"],
+            "toolSpec": {
+                "name": fn["name"],
+                "description": fn.get("description", ""),
+                "inputSchema": {"json": fn["parameters"]},
+            }
         })
     return specs
 
 
 def _usage_metadata(usage: dict[str, Any] | None) -> dict[str, int] | None:
-    """Map the Anthropic response `usage` block to LangChain's UsageMetadata so
+    """Map the Converse response `usage` block to LangChain's UsageMetadata so
     `AIMessage.usage_metadata` carries token counts for cost/usage views.
 
     The `usage` block is part of the Bedrock response body and is independent of the
-    proxy's `show_usage` print flag, so it is read straight from `.json()`. Returns
-    None when absent, so a caller can tell "unknown" apart from a genuine zero."""
+    proxy's `show_usage` print flag, so it is read straight from `.json()`. Converse
+    reports `totalTokens` itself rather than leaving it to be summed. Returns None when
+    absent, so a caller can tell "unknown" apart from a genuine zero."""
     if not usage:
         return None
-    input_tokens = usage.get("input_tokens", 0)
-    output_tokens = usage.get("output_tokens", 0)
+    input_tokens = usage.get("inputTokens", 0)
+    output_tokens = usage.get("outputTokens", 0)
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
-        "total_tokens": input_tokens + output_tokens,
+        "total_tokens": usage.get("totalTokens", input_tokens + output_tokens),
     }
 
 
@@ -204,27 +266,31 @@ class DeptBedrockChat(BaseChatModel):
     - **Synchronous only.** Implements `_generate`; there is no `_agenerate` /
       `_astream`, so a high-concurrency web UI blocks a worker thread per call.
     - **No streaming.** `_stream` is unimplemented — a full response is returned at
-      once, so a UI cannot render tokens as they are produced.
+      once, so a UI cannot render tokens as they are produced. The proxy does support
+      it (`bedrock.invoke(..., stream=True)`), so this is a gap in the adapter rather
+      than in the transport.
     - **Usage and cost are surfaced.** Token counts from the response `usage` block map
       onto `AIMessage.usage_metadata`; the proxy's per-call `x-cost` / `x-tokens-used`
       response headers map onto `response_metadata["cost_usd"]` / `["tokens_used"]` (see
       `_header_cost` — cost is the proxy's, never a hardcoded price table). Account-level
       daily budget is a separate call, `dwutils.bedrock.get_usage()`, not done here.
       Cache-read/-write token fields are not captured.
-    - **Error handling is diagnostic, not retryable.** A proxy/transport failure or a
-      non-JSON body is re-raised as `BedrockProxyError` with a message naming the likely
-      cause (token, model_id, proxy URL) — but there is no automatic retry/backoff.
+    - **Retries belong to the proxy.** `dwutils.bedrock` retries throttling and dropped
+      connections with backoff, honouring `Retry-After`; `max_retries` below is passed
+      through to it. A failure that survives that is re-raised as `BedrockProxyError`
+      carrying the proxy's own message and `status_code`.
     - **Fixed decoding params.** `max_tokens` defaults to 10000; temperature / top_p
       are not plumbed through.
     """
 
     model_id: str = DEFAULT_MODEL_ID
     max_tokens: int = 10000
+    max_retries: int = DEFAULT_MAX_RETRIES
 
     def bind_tools(
         self, tools: Sequence[Any], **kwargs: Any
     ) -> Runnable[Any, BaseMessage]:
-        return self.bind(tools=_to_anthropic_tools(tools), **kwargs)
+        return self.bind(tools=_to_converse_tools(tools), **kwargs)
 
     def _generate(
         self,
@@ -233,46 +299,49 @@ class DeptBedrockChat(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        system, anthropic_messages = _to_anthropic(messages)
+        system, converse_messages = _to_converse(messages)
+        inference: dict[str, Any] = {"maxTokens": self.max_tokens}
+        if stop:
+            inference["stopSequences"] = stop
         request: dict[str, Any] = {
             "model_id": self.model_id,
-            "anthropic_version": ANTHROPIC_VERSION,
-            "max_tokens": self.max_tokens,
-            "messages": anthropic_messages,
+            "messages": converse_messages,
+            "inferenceConfig": inference,
         }
         if system:
             request["system"] = system
         if kwargs.get("tools"):
-            request["tools"] = kwargs["tools"]
-        if stop:
-            request["stop_sequences"] = stop
+            request["toolConfig"] = {"tools": kwargs["tools"]}
 
-        response = _invoke(request)
+        response = _invoke(request, max_retries=self.max_retries)
         try:
             data = response.json()
         except ValueError as exc:  # 2xx but a non-JSON body — surface it, don't mask
             raise BedrockProxyError(
                 "bedrock-proxy returned a response that is not JSON. The call succeeded at "
-                "the transport level but the body could not be parsed as an Anthropic "
+                "the transport level but the body could not be parsed as a Converse "
                 f"response. First bytes: {str(getattr(response, 'text', ''))[:200]!r}"
             ) from exc
 
         text = ""
         tool_calls = []
-        for block in data.get("content", []):
-            kind = block.get("type")
-            if kind == "text":
+        # Converse nests the reply under output.message, and tags each block by its
+        # key rather than by a "type" field.
+        content = data.get("output", {}).get("message", {}).get("content", [])
+        for block in content:
+            if "text" in block:
                 text += block["text"]
-            elif kind == "tool_use":
+            elif "toolUse" in block:
+                use = block["toolUse"]
                 tool_calls.append({
-                    "name": block["name"],
-                    "args": block["input"],
-                    "id": block["id"],
+                    "name": use["name"],
+                    "args": use["input"],
+                    "id": use["toolUseId"],
                     "type": "tool_call",
                 })
 
         # Per-call cost/tokens live in the proxy response headers, not the body.
-        metadata: dict[str, Any] = {"stop_reason": data.get("stop_reason")}
+        metadata: dict[str, Any] = {"stop_reason": data.get("stopReason")}
         cost = _header_cost(response.headers)
         if cost is not None:
             metadata["cost_usd"] = cost
