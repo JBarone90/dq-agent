@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import uuid
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
@@ -306,47 +307,123 @@ def step_7_prompt_cache() -> bool:
     return False
 
 
-def step_8_cache_ttl() -> None:
-    """Will the proxy take a 1-hour cache TTL?
-
-    The default entry lasts 5 minutes. The scoping agent pauses at the approval gate
-    for a human to read a contract, which routinely takes longer than that, so the
-    entry is often dead exactly when the conversation resumes. The proxy prices both
-    `cache_write_5m` and `cache_write_1h`, so a longer TTL is purchasable -- what is
-    not documented is how to ask for one.
-
-    This only establishes whether the request is *accepted*; confirming the entry
-    really survives an hour would mean waiting one out. Informational either way.
-    """
-    _hr("8. Cache TTL probe (is a 1-hour cachePoint accepted?)")
-    from dwutils import bedrock
-
-    filler = "You are a careful data quality assistant. " * 400
-    request = {
+def _fresh_cache_request(cache_point: dict) -> dict:
+    """A request whose prefix is unique, so it writes a new entry instead of
+    reading one an earlier probe left behind."""
+    filler = (
+        f"Session {uuid.uuid4().hex}. "
+        + "You are a careful data quality assistant. " * 400
+    )
+    return {
         "model_id": MODEL_ID,
-        "system": [{"text": filler}, {"cachePoint": {"type": "default", "ttl": "1h"}}],
+        "system": [{"text": filler}, cache_point],
         "messages": [{"role": "user", "content": [{"text": "Reply with exactly: one"}]}],
         "inferenceConfig": {"maxTokens": 16},
     }
+
+
+def _implied_write_rate(response, pricing: dict) -> tuple[float | None, dict]:
+    """What the proxy actually charged per million cache-write tokens.
+
+    Backed out of the `x-cost` header by subtracting what the input, output and
+    cache-read tokens cost at the published rates. This is the only instant way to
+    tell an honoured TTL from an ignored one: an unknown JSON field is usually
+    dropped silently rather than rejected, but the two TTLs are priced differently,
+    so the bill says which was applied."""
+    data = response.json()
+    usage = data.get("usage", {})
+    written = usage.get("cacheWriteInputTokens", 0)
+    if not written:
+        return None, usage
+    cost = float(response.headers.get("x-cost", 0) or 0)
+    if not cost:
+        return None, usage
+    rest = (
+        usage.get("inputTokens", 0) * pricing.get("input", 0.0)
+        + usage.get("outputTokens", 0) * pricing.get("output", 0.0)
+        + usage.get("cacheReadInputTokens", 0) * pricing.get("cache_read", 0.0)
+    ) / 1e6
+    return (cost - rest) * 1e6 / written, usage
+
+
+def step_8_cache_ttl() -> None:
+    """Can a 1-hour cache entry actually be bought, or is the ttl field ignored?
+
+    The default entry lasts 5 minutes. The scoping agent pauses at the approval gate
+    for a human to read a contract, routinely longer than that, so the entry is often
+    dead exactly when the conversation resumes. The proxy prices both
+    `cache_write_5m` and `cache_write_1h`, so a longer entry is purchasable; how to
+    ask for one is undocumented.
+
+    Accepting the request proves nothing on its own -- unknown fields are usually
+    ignored, not rejected. Two things are checked instead: whether a deliberately
+    nonsensical TTL is also accepted (which would mean the field is not read at all),
+    and what the write was actually billed at. Each call uses a unique prefix so it
+    writes rather than reading a previous probe's entry."""
+    _hr("8. Cache TTL probe (is a 1-hour entry really bought?)")
+    from dwutils import bedrock
+
+    pricing = bedrock.get_model_info(MODEL_ID).get("pricing", {})
+    rate_5m = pricing.get("cache_write_5m")
+    rate_1h = pricing.get("cache_write_1h")
+    if not rate_5m or not rate_1h:
+        print("  This model does not price the two TTLs separately, so there is")
+        print("  nothing to tell apart. Skipping.")
+        return
+    print(f"  published rates: 5m=${rate_5m}/M  1h=${rate_1h}/M")
+
+    # Control: if a nonsense TTL is accepted too, the field is not being read.
     try:
-        data = bedrock.invoke(request=request, simple=False, show_usage=False).json()
+        bedrock.invoke(
+            request=_fresh_cache_request({"cachePoint": {"type": "default", "ttl": "99h"}}),
+            simple=False,
+            show_usage=False,
+        )
+        bogus_ok = True
+    except bedrock.BedrockError:
+        bogus_ok = False
+    print(f"  nonsense ttl=99h rejected: {not bogus_ok}")
+
+    try:
+        response = bedrock.invoke(
+            request=_fresh_cache_request({"cachePoint": {"type": "default", "ttl": "1h"}}),
+            simple=False,
+            show_usage=False,
+        )
     except bedrock.BedrockError as error:
-        print(f"  Rejected ({error.status_code}): {error.message}")
+        print(f"  ttl=1h rejected ({error.status_code}): {error.message}")
         print("")
-        print("  So a 1-hour entry cannot be requested this way. Caching still works")
-        print("  at the 5-minute default; expect a miss on the turn after a long")
-        print("  pause at the approval gate.")
+        print("  A 1-hour entry cannot be requested this way. Caching still works at")
+        print("  the 5-minute default; expect a miss on the turn after a long pause")
+        print("  at the approval gate.")
         return
 
-    usage = data.get("usage", {})
+    rate, usage = _implied_write_rate(response, pricing)
     print(
-        f"  accepted: cache_write={usage.get('cacheWriteInputTokens')} "
+        f"  ttl=1h write: cache_write={usage.get('cacheWriteInputTokens')} "
         f"cache_read={usage.get('cacheReadInputTokens')}"
     )
+    if rate is None:
+        print("")
+        print("  INCONCLUSIVE: nothing was written, or no cost header came back, so")
+        print("  there is no bill to read the TTL off. Re-run; if it persists, the")
+        print("  only proof left is writing an entry and reading it back after six")
+        print("  minutes.")
+        return
+
+    print(f"  billed at:    ${rate:.3f}/M")
     print("")
-    print("  PASS: the proxy accepts a ttl field. Worth using for the rolling cache")
-    print("  point so an entry survives the approval gate -- note it is priced at")
-    print("  cache_write_1h, which is 2x input rather than 1.25x.")
+    if abs(rate - rate_1h) < abs(rate - rate_5m):
+        print("  PASS: billed at the 1-hour rate, so the ttl field is honoured.")
+        print("  Worth using on the rolling cache point: an entry then survives the")
+        print("  approval gate. It costs 2x input to write rather than 1.25x.")
+    elif bogus_ok:
+        print("  IGNORED: billed at the 5-minute rate, and a nonsense TTL was accepted")
+        print("  too. The field is being dropped silently. Leave the cache point")
+        print("  unqualified and expect a miss after a long pause at the gate.")
+    else:
+        print("  UNCLEAR: the request was validated but billed at the 5-minute rate.")
+        print("  Ask whoever runs the proxy how a 1-hour entry is requested.")
 
 
 def main() -> None:
