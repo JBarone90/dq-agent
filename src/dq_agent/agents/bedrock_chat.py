@@ -42,6 +42,9 @@ from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
 DEFAULT_MODEL_ID = "eu.anthropic.claude-sonnet-5"
+CACHE_POINT = {"cachePoint": {"type": "default"}}
+"""Marks how far back a request should be cached. See `DeptBedrockChat.cache_prompt`."""
+
 DEFAULT_MAX_RETRIES = 3
 """Attempts per call, including the first — `dwutils.bedrock` does the backoff."""
 
@@ -312,7 +315,56 @@ def _header_int(headers: Any, name: str) -> int | None:
         return None
 
 
-def _chunk_from_event(event: dict[str, Any]) -> AIMessageChunk | None:
+_PRICING: dict[str, dict[str, float] | None] = {}
+"""Per-model prices from the proxy, memoised. Prices are static per model."""
+
+
+def _pricing(model_id: str) -> dict[str, float] | None:
+    """The proxy's per-million-token prices for a model, or None if unavailable.
+
+    Fetched from `get_model_info`, so these are still the proxy's prices rather than a
+    table baked in here -- the same source the `x-cost` header is computed from. A
+    failure is swallowed and cached as None: cost is a dev readout, and no lookup for
+    it should ever take down a chat turn."""
+    if model_id in _PRICING:
+        return _PRICING[model_id]
+    prices: dict[str, float] | None = None
+    try:
+        from dwutils import bedrock
+
+        prices = bedrock.get_model_info(model_id).get("pricing")
+    except Exception:  # noqa: BLE001 - a missing cost readout must not break a turn
+        prices = None
+    _PRICING[model_id] = prices
+    return prices
+
+
+def _computed_cost(model_id: str, usage: dict[str, Any] | None) -> float | None:
+    """Dollar cost of one call, worked out from token counts and the proxy's prices.
+
+    Needed only for streamed turns. HTTP headers are sent before the body, so when a
+    stream opens the proxy does not yet know how many output tokens there will be and
+    cannot stamp `x-cost`; the token counts instead arrive in the closing `metadata`
+    event. Multiplying those by the published prices recovers the number.
+
+    Cache writes are priced at the 5-minute rate, which is what an unqualified
+    `cachePoint` buys; a 1-hour entry would cost more, so this under-reports if the
+    proxy is ever asked for one."""
+    prices = _pricing(model_id)
+    if not prices or not usage:
+        return None
+    charged = (
+        usage.get("inputTokens", 0) * prices.get("input", 0.0)
+        + usage.get("outputTokens", 0) * prices.get("output", 0.0)
+        + usage.get("cacheReadInputTokens", 0) * prices.get("cache_read", 0.0)
+        + usage.get("cacheWriteInputTokens", 0) * prices.get("cache_write_5m", 0.0)
+    )
+    return charged / 1e6
+
+
+def _chunk_from_event(
+    event: dict[str, Any], model_id: str | None = None
+) -> AIMessageChunk | None:
     """Translate one raw Converse stream event into an AIMessageChunk.
 
     Returns None for the events that carry nothing LangChain needs (`messageStart`,
@@ -367,13 +419,52 @@ def _chunk_from_event(event: dict[str, Any]) -> AIMessageChunk | None:
 
     if "metadata" in event:
         # Token counts arrive here rather than in headers: a streamed response carries
-        # no usage headers at all, which is also why cost is unavailable when streaming.
-        usage = _usage_metadata(event["metadata"].get("usage"))
+        # no usage headers at all, so cost is worked out from the proxy's prices.
+        block = event["metadata"].get("usage")
+        usage = _usage_metadata(block)
         if usage is None:
             return None
-        return AIMessageChunk(content="", usage_metadata=usage)
+        metadata: dict[str, Any] = {}
+        cost = _computed_cost(model_id, block) if model_id else None
+        if cost is not None:
+            metadata["cost_usd"] = cost
+            metadata["cost_source"] = "computed"
+        return AIMessageChunk(
+            content="", usage_metadata=usage, response_metadata=metadata
+        )
 
     return None
+
+
+def _with_cache_points(request: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of `request` marked up for prompt caching.
+
+    Two markers. The first sits at the end of `system`: Converse assembles a request
+    as tools, then system, then messages, so a marker there covers the tool schema as
+    well, and neither is large enough to cache on its own.
+
+    The second sits at the end of the last message, and is the one that earns its
+    keep. Each turn resends the previous turn's request plus a few new messages, so
+    last turn's stored entry is matched automatically and this turn stores a slightly
+    longer one. The window rolls forward with the conversation and nothing here has to
+    track which turn is which.
+
+    Reads need no marker: Bedrock matches the longest stored request it already holds
+    and bills those tokens at the cache rate. A marker only says how much to store.
+
+    The copy is shallow but never writes through to the caller's lists, so a request
+    can be built once and marked up without the markers leaking into a retry."""
+    marked = dict(request)
+    if marked.get("system"):
+        marked["system"] = [*marked["system"], CACHE_POINT]
+    messages = marked.get("messages")
+    if messages:
+        last = messages[-1]
+        marked["messages"] = [
+            *messages[:-1],
+            {**last, "content": [*last["content"], CACHE_POINT]},
+        ]
+    return marked
 
 
 class DeptBedrockChat(BaseChatModel):
@@ -412,6 +503,7 @@ class DeptBedrockChat(BaseChatModel):
     model_id: str = DEFAULT_MODEL_ID
     max_tokens: int = 10000
     max_retries: int = DEFAULT_MAX_RETRIES
+    cache_prompt: bool = True
 
     def bind_tools(
         self, tools: Sequence[Any], **kwargs: Any
@@ -439,7 +531,7 @@ class DeptBedrockChat(BaseChatModel):
             request["system"] = system
         if tools:
             request["toolConfig"] = {"tools": tools}
-        return request
+        return _with_cache_points(request) if self.cache_prompt else request
 
     def _generate(
         self,
@@ -481,6 +573,7 @@ class DeptBedrockChat(BaseChatModel):
         cost = _header_cost(response.headers)
         if cost is not None:
             metadata["cost_usd"] = cost
+            metadata["cost_source"] = "proxy"
         tokens_used = _header_int(response.headers, "x-tokens-used")
         if tokens_used is not None:
             metadata["tokens_used"] = tokens_used
@@ -515,7 +608,7 @@ class DeptBedrockChat(BaseChatModel):
         events = _invoke(request, max_retries=self.max_retries, stream=True)
         try:
             for event in events:
-                chunk = _chunk_from_event(event)
+                chunk = _chunk_from_event(event, self.model_id)
                 if chunk is None:
                     continue
                 generation = ChatGenerationChunk(message=chunk)

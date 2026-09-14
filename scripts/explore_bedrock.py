@@ -166,6 +166,95 @@ def step_5_tool_result_roundtrip() -> None:
     print("\n  PASS: tool_result round-trip completed.")
 
 
+def step_6_prefix_size() -> None:
+    """How big is the part of every request that never changes?
+
+    Prompt caching has a minimum below which nothing is stored at all (1024 tokens
+    on Sonnet 4.6). The tool schema and system prompt are the only static part of a
+    scoping request, so if they fall short of it the system cache point stores
+    nothing and only the rolling message one earns its keep. Counted through the
+    proxy rather than estimated locally, because the estimate lands near the line."""
+    _hr("6. Static prefix size (bedrock.get_input_token_usage)")
+    from dwutils import bedrock
+
+    from dq_agent.agents.bedrock_chat import _to_converse_tools
+    from dq_agent.agents.scoping import DEFAULT_RULES_DIR, SYSTEM_PROMPT, _make_tools
+    from dq_agent.registry import Registry
+
+    tools = _to_converse_tools(_make_tools(Registry(DEFAULT_RULES_DIR)))
+    request = {
+        "model_id": MODEL_ID,
+        "system": [{"text": SYSTEM_PROMPT}],
+        "messages": [{"role": "user", "content": [{"text": "hi"}]}],
+        "inferenceConfig": {"maxTokens": 16},
+        "toolConfig": {"tools": tools},
+    }
+    tokens = bedrock.get_input_token_usage(request)
+    minimum = bedrock.get_model_info(MODEL_ID).get("caching", {}).get("min_tokens")
+    print(f"  tools + system + one message: {tokens} input tokens")
+    print(f"  cache minimum for this model:  {minimum}")
+    if minimum and tokens < minimum:
+        print("")
+        print("  NOTE: below the minimum. The system cache point will store nothing;")
+        print("  only the rolling message cache point will, once the transcript grows.")
+    else:
+        print("")
+        print("  PASS: the static prefix is large enough to cache on its own.")
+
+
+def step_7_prompt_cache() -> bool:
+    """Does the proxy accept a cachePoint, and does an identical second call read it?
+
+    `cachePoint` is the one part of the caching wire format dwutils does not
+    document, so this is the same go/no-go the toolConfig probe was. Two identical
+    calls: the first should report cache *write* tokens, the second should report the
+    same prefix as cache *read* tokens."""
+    _hr("7. Prompt cache probe (two identical calls with a cachePoint)")
+    from dwutils import bedrock
+
+    # Comfortably over any per-model minimum, so a miss means the mechanism is off
+    # rather than the prompt being too small to bother storing.
+    filler = "You are a careful data quality assistant. " * 400
+    request = {
+        "model_id": MODEL_ID,
+        "system": [{"text": filler}, {"cachePoint": {"type": "default"}}],
+        "messages": [{"role": "user", "content": [{"text": "Reply with exactly: one"}]}],
+        "inferenceConfig": {"maxTokens": 16},
+    }
+
+    def call(label: str) -> dict:
+        data = bedrock.invoke(request=request, simple=False, show_usage=False).json()
+        usage = data.get("usage", {})
+        print(
+            f"  {label}: input={usage.get('inputTokens')} "
+            f"cache_write={usage.get('cacheWriteInputTokens')} "
+            f"cache_read={usage.get('cacheReadInputTokens')}"
+        )
+        return usage
+
+    try:
+        call("first call ")
+        second = call("second call")
+    except bedrock.BedrockError as error:
+        print(f"  FAIL: the proxy rejected the request ({error.status_code}).")
+        print(f"  {error.message}")
+        if error.status_code == 400:
+            print("")
+            print("  A 400 means the cachePoint spelling is wrong. Run the app with")
+            print("  DQ_AGENT_PROMPT_CACHE=0 until `_with_cache_points` in")
+            print("  src/dq_agent/agents/bedrock_chat.py matches what the proxy wants.")
+        return False
+
+    print("")
+    if second.get("cacheReadInputTokens"):
+        print("  PASS: the second call read the first call's cached prefix.")
+        return True
+    print("  FAIL: no cache read on the second call. The proxy accepted the cachePoint")
+    print("  but nothing was reused -- check whether caching is enabled for your")
+    print("  account, then keep DQ_AGENT_PROMPT_CACHE=0 so requests stay unmarked.")
+    return False
+
+
 def main() -> None:
     step_0_env()
     step_1_models()
@@ -174,6 +263,9 @@ def main() -> None:
         sys.exit(1)
     step_4_adapter_tool_call()
     step_5_tool_result_roundtrip()
+    step_6_prefix_size()
+    if not step_7_prompt_cache():
+        sys.exit(1)
     _hr("All checks passed — Bedrock proxy is ready for the scoping agent.")
 
 

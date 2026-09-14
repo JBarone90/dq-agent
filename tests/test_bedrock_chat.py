@@ -223,8 +223,86 @@ def test_generate_includes_system_when_present(monkeypatch):
         return FakeResponse(_converse([{"text": "ok"}]))
 
     monkeypatch.setattr(bedrock_chat, "_invoke", fake_invoke)
-    DeptBedrockChat().invoke([SystemMessage("be terse"), HumanMessage("hi")])
+    DeptBedrockChat(cache_prompt=False).invoke(
+        [SystemMessage("be terse"), HumanMessage("hi")]
+    )
     assert captured["system"] == [{"text": "be terse"}]
+
+
+# --- prompt caching ------------------------------------------------------
+
+
+def test_cache_points_mark_system_and_the_last_message(monkeypatch):
+    """One marker after system (which covers the tool schema, since Converse orders a
+    request tools-then-system-then-messages), one at the end of the transcript."""
+    captured = {}
+
+    def fake_invoke(request, **kw):
+        captured.update(request)
+        return FakeResponse(_converse([{"text": "ok"}]))
+
+    monkeypatch.setattr(bedrock_chat, "_invoke", fake_invoke)
+    DeptBedrockChat().bind_tools([get_weather]).invoke(
+        [SystemMessage("be terse"), HumanMessage("hi")]
+    )
+
+    assert captured["system"] == [{"text": "be terse"}, bedrock_chat.CACHE_POINT]
+    assert captured["messages"][-1]["content"] == [
+        {"text": "hi"}, bedrock_chat.CACHE_POINT
+    ]
+    # the tool schema is covered by the system marker, not one of its own
+    assert bedrock_chat.CACHE_POINT not in captured["toolConfig"]["tools"]
+
+
+def test_cache_points_roll_forward_with_the_conversation(monkeypatch):
+    """The marker always lands on the newest message, so what this turn stores is what
+    the next turn matches."""
+    captured = {}
+
+    def fake_invoke(request, **kw):
+        captured.update(request)
+        return FakeResponse(_converse([{"text": "ok"}]))
+
+    monkeypatch.setattr(bedrock_chat, "_invoke", fake_invoke)
+    DeptBedrockChat().invoke([
+        HumanMessage("first"),
+        AIMessage("reply"),
+        HumanMessage("second"),
+    ])
+
+    messages = captured["messages"]
+    assert messages[-1]["content"] == [{"text": "second"}, bedrock_chat.CACHE_POINT]
+    assert all(
+        bedrock_chat.CACHE_POINT not in m["content"] for m in messages[:-1]
+    ), "only the newest message is marked"
+
+
+def test_cache_prompt_off_sends_no_markers(monkeypatch):
+    captured = {}
+
+    def fake_invoke(request, **kw):
+        captured.update(request)
+        return FakeResponse(_converse([{"text": "ok"}]))
+
+    monkeypatch.setattr(bedrock_chat, "_invoke", fake_invoke)
+    DeptBedrockChat(cache_prompt=False).invoke(
+        [SystemMessage("be terse"), HumanMessage("hi")]
+    )
+    assert captured["system"] == [{"text": "be terse"}]
+    assert captured["messages"][-1]["content"] == [{"text": "hi"}]
+
+
+def test_cache_points_do_not_leak_into_a_rebuilt_request(monkeypatch):
+    """Marking must not write through to the lists `_to_converse` built, or a retry
+    would send a request with the markers doubled up."""
+    request = {
+        "system": [{"text": "s"}],
+        "messages": [{"role": "user", "content": [{"text": "hi"}]}],
+    }
+    marked = bedrock_chat._with_cache_points(request)
+    assert marked["system"] == [{"text": "s"}, bedrock_chat.CACHE_POINT]
+    assert request["system"] == [{"text": "s"}]
+    assert request["messages"][0]["content"] == [{"text": "hi"}]
 
 
 def test_generate_surfaces_cache_tokens_from_usage_block(monkeypatch):
@@ -449,3 +527,64 @@ def test_stream_and_generate_send_the_same_request_shape(monkeypatch):
 
     assert seen[0][0] == seen[1][0]
     assert [streamed for _, streamed in seen] == [False, True]
+
+
+# --- streamed turns are priced locally ------------------------------------
+
+
+_PRICES = {"input": 3.3, "output": 16.5, "cache_read": 0.33, "cache_write_5m": 4.125}
+
+
+def test_streamed_turn_is_priced_from_the_proxys_published_rates(monkeypatch):
+    """A stream's headers are sent before a single token exists, so the proxy cannot
+    stamp x-cost on it. Token counts arrive in the closing metadata event instead, and
+    multiplying them by `get_model_info` prices recovers the number."""
+    monkeypatch.setitem(bedrock_chat._PRICING, bedrock_chat.DEFAULT_MODEL_ID, _PRICES)
+    monkeypatch.setattr(bedrock_chat, "_invoke", _stream_events(
+        {"contentBlockDelta": {"delta": {"text": "ok"}}},
+        {"metadata": {"usage": {
+            "inputTokens": 1_000_000, "outputTokens": 0, "totalTokens": 1_000_000,
+        }}},
+    ))
+    chunks = list(DeptBedrockChat().stream([HumanMessage("hi")]))
+    priced = [c for c in chunks if "cost_usd" in (c.response_metadata or {})]
+    assert len(priced) == 1
+    assert priced[0].response_metadata["cost_usd"] == pytest.approx(3.3)
+    assert priced[0].response_metadata["cost_source"] == "computed"
+
+
+def test_streamed_cost_prices_cache_tokens_at_the_cache_rate(monkeypatch):
+    """Cached input is the whole point of caching, so it must not be billed as input."""
+    monkeypatch.setitem(bedrock_chat._PRICING, bedrock_chat.DEFAULT_MODEL_ID, _PRICES)
+    monkeypatch.setattr(bedrock_chat, "_invoke", _stream_events(
+        {"metadata": {"usage": {
+            "inputTokens": 0, "outputTokens": 0, "totalTokens": 1_000_000,
+            "cacheReadInputTokens": 1_000_000,
+        }}},
+    ))
+    chunk = list(DeptBedrockChat().stream([HumanMessage("hi")]))[0]
+    assert chunk.response_metadata["cost_usd"] == pytest.approx(0.33)
+
+
+def test_streamed_turn_without_pricing_carries_no_cost(monkeypatch):
+    """Off-network the pricing lookup fails; a missing cost must stay missing rather
+    than becoming a zero the sidebar would total up."""
+    monkeypatch.setitem(bedrock_chat._PRICING, bedrock_chat.DEFAULT_MODEL_ID, None)
+    monkeypatch.setattr(bedrock_chat, "_invoke", _stream_events(
+        {"metadata": {"usage": {"inputTokens": 10, "outputTokens": 5}}},
+    ))
+    chunk = list(DeptBedrockChat().stream([HumanMessage("hi")]))[0]
+    assert "cost_usd" not in (chunk.response_metadata or {})
+    assert chunk.usage_metadata["input_tokens"] == 10
+
+
+def test_non_streamed_cost_is_labelled_as_the_proxys(monkeypatch):
+    monkeypatch.setattr(
+        bedrock_chat, "_invoke",
+        lambda request, **kw: FakeResponse(
+            _converse([{"text": "ok"}]), headers={"x-cost": "$0.0034"}
+        ),
+    )
+    result = DeptBedrockChat().invoke([HumanMessage("hi")])
+    assert result.response_metadata["cost_usd"] == 0.0034
+    assert result.response_metadata["cost_source"] == "proxy"

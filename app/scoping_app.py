@@ -158,15 +158,20 @@ def _cache_usage(result: dict[str, Any] | None) -> tuple[int, int] | None:
     return (read, write) if seen else None
 
 
-def _session_cost(result: dict[str, Any] | None) -> tuple[float, bool] | None:
-    """Total $ across the transcript from response_metadata['cost_usd'], with a flag
-    for whether every assistant turn was priced. None when no message carries a cost,
-    so the dev metric stays hidden rather than showing a wrong $0.
+def _session_cost(
+    result: dict[str, Any] | None,
+) -> tuple[float, bool, bool] | None:
+    """Total $ across the transcript, as (total, complete, computed).
 
-    The flag matters because the proxy stamps `x-cost` only on non-streamed responses.
-    A session that streamed some turns would otherwise quietly total up a fraction of
-    what was actually spent, which is worse than showing nothing."""
+    `complete` is False when some assistant turn carried no cost at all, so the total
+    is a floor rather than the bill; that happens when the pricing lookup is
+    unavailable. `computed` is True when any turn was priced locally instead of from
+    the proxy's `x-cost` header, which is how a streamed turn is priced: a stream's
+    headers are sent before any token exists, so the proxy cannot put a final cost on
+    them. None when nothing carries a cost, so the metric hides rather than showing a
+    wrong $0."""
     total = 0.0
+    computed = 0
     priced = unpriced = 0
     for msg in (result or {}).get("messages", []):
         if not isinstance(msg, AIMessage):
@@ -175,11 +180,13 @@ def _session_cost(result: dict[str, Any] | None) -> tuple[float, bool] | None:
         if "cost_usd" in meta:
             total += meta["cost_usd"]
             priced += 1
+            if meta.get("cost_source") == "computed":
+                computed += 1
         else:
             unpriced += 1
     if not priced:
         return None
-    return total, unpriced == 0
+    return total, unpriced == 0, computed > 0
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -468,15 +475,19 @@ def _sidebar(result: dict[str, Any] | None) -> bool:
 
         cost = _session_cost(result)
         if cost is not None:
-            spend, complete = cost
+            spend, complete, computed = cost
             st.metric(
                 "Session cost (dev)",
                 f"${spend:.4f}" if complete else f">= ${spend:.4f}",
             )
             if not complete:
                 st.caption(
-                    "A floor, not the total: the proxy sends no cost header on a "
-                    "streamed response."
+                    "A floor, not the total: some turns could not be priced."
+                )
+            elif computed:
+                st.caption(
+                    "Streamed turns are priced from the proxy's published rates, not "
+                    "its per-call cost header."
                 )
 
         usage = _daily_usage()

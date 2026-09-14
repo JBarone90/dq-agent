@@ -406,7 +406,11 @@ def build_graph(
         from dq_agent.agents.bedrock_chat import DEFAULT_MODEL_ID, DeptBedrockChat
 
         model = DeptBedrockChat(
-            model_id=os.environ.get("DQ_AGENT_MODEL", DEFAULT_MODEL_ID)
+            model_id=os.environ.get("DQ_AGENT_MODEL", DEFAULT_MODEL_ID),
+            # Prompt caching is on by default; DQ_AGENT_PROMPT_CACHE=0 turns it
+            # off, which is the escape hatch if the proxy ever rejects the
+            # cachePoint blocks.
+            cache_prompt=os.environ.get("DQ_AGENT_PROMPT_CACHE", "1") != "0",
         )
     if registry is None:
         registry = Registry(DEFAULT_RULES_DIR)
