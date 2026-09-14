@@ -14,6 +14,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 import dq_agent.connectors as connectors
+from dq_agent.agents import bedrock_chat
+from dq_agent.agents.bedrock_chat import DeptBedrockChat
 from dq_agent.agents.scoping import ProposedRule, _make_tools, build_graph
 from dq_agent.connectors import ProfilingLoad
 from dq_agent.engine import run
@@ -354,3 +356,68 @@ def test_text_string_approve_persists(tmp_path, registry, synthetic_data_path, m
     graph.invoke(Command(resume="approve"), config)
 
     assert (tmp_path / "orders.yaml").exists()
+
+
+def _converse_tool_stream(name, args, call_id):
+    """Raw Converse stream events for one turn that calls a single tool.
+
+    Written at the wire level on purpose: this drives the real DeptBedrockChat._stream
+    rather than a LangChain fake, because the streamed tool-call path (partial JSON
+    arguments reassembled across deltas) is ours to get right, not LangChain's."""
+    return [
+        {"messageStart": {"role": "assistant"}},
+        {"contentBlockStart": {
+            "start": {"toolUse": {"toolUseId": call_id, "name": name}},
+            "contentBlockIndex": 0,
+        }},
+        {"contentBlockDelta": {
+            "delta": {"toolUse": {"input": json.dumps(args)}},
+            "contentBlockIndex": 0,
+        }},
+        {"contentBlockStop": {"contentBlockIndex": 0}},
+        {"messageStop": {"stopReason": "tool_use"}},
+    ]
+
+
+def test_streamed_run_still_pauses_on_the_approval_interrupt(
+    tmp_path, registry, synthetic_data_path, monkeypatch
+):
+    """A driver that streams must still find the approval gate.
+
+    `graph.stream` yields message chunks rather than the result dict `invoke` returns,
+    so `__interrupt__` never reaches the caller: the pause shows up only in the
+    persisted snapshot. That is why the Streamlit driver reloads state from the
+    checkpointer after streaming instead of trusting a return value.
+    """
+    csv = str(synthetic_data_path / "orders.csv")
+    turns = iter([
+        _converse_tool_stream("profile_dataset", {"path": csv}, "c1"),
+        _converse_tool_stream(
+            "propose_contract",
+            {"rules": [{"rule_id": "null_check", "params": {"column": "order_id"}}]},
+            "c2",
+        ),
+        _converse_tool_stream("request_approval", {}, "c3"),
+    ])
+    monkeypatch.setattr(bedrock_chat, "_invoke", lambda request, **kw: next(turns))
+
+    graph = build_graph(
+        model=DeptBedrockChat(),
+        registry=registry,
+        contracts_dir=tmp_path,
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": "stream-1"}}
+    list(graph.stream(
+        {"messages": [HumanMessage("scope orders.csv")]},
+        config,
+        stream_mode="messages",
+    ))
+
+    snapshot = graph.get_state(config)
+    interrupts = [i for task in snapshot.tasks for i in getattr(task, "interrupts", ())]
+    assert interrupts, "streamed run did not surface the approval interrupt"
+    action = interrupts[0].value["action_requests"][0]
+    assert action["name"] == "approve_contract"
+    assert "```yaml" in action["description"]
+    assert not list(tmp_path.glob("*.yaml")), "nothing persists before approval"

@@ -357,3 +357,95 @@ def test_generate_non_json_body_becomes_bedrock_proxy_error(monkeypatch):
     )
     with pytest.raises(BedrockProxyError):
         DeptBedrockChat().invoke([HumanMessage("hi")])
+
+
+# --- streaming -----------------------------------------------------------
+
+
+def _stream_events(*events):
+    """A fake `_invoke` that returns raw Converse stream events instead of a Response."""
+    def fake_invoke(request, **kw):
+        assert kw.get("stream") is True, "streaming must ask the proxy for a stream"
+        return list(events)
+    return fake_invoke
+
+
+def test_stream_yields_text_chunks(monkeypatch):
+    monkeypatch.setattr(bedrock_chat, "_invoke", _stream_events(
+        {"messageStart": {"role": "assistant"}},
+        {"contentBlockDelta": {"delta": {"text": "Hel"}, "contentBlockIndex": 0}},
+        {"contentBlockDelta": {"delta": {"text": "lo"}, "contentBlockIndex": 0}},
+        {"contentBlockStop": {"contentBlockIndex": 0}},
+        {"messageStop": {"stopReason": "end_turn"}},
+    ))
+    chunks = list(DeptBedrockChat().stream([HumanMessage("hi")]))
+    assert "".join(c.content for c in chunks) == "Hello"
+
+
+def test_stream_assembles_tool_calls_from_partial_json(monkeypatch):
+    """Converse streams tool arguments as partial JSON text across several deltas;
+    merging the chunks is what parses them back into a real tool call."""
+    monkeypatch.setattr(bedrock_chat, "_invoke", _stream_events(
+        {"contentBlockStart": {
+            "start": {"toolUse": {"toolUseId": "t1", "name": "get_weather"}},
+            "contentBlockIndex": 0,
+        }},
+        {"contentBlockDelta": {"delta": {"toolUse": {"input": '{"city":'}},
+                               "contentBlockIndex": 0}},
+        {"contentBlockDelta": {"delta": {"toolUse": {"input": ' "Paris"}'}},
+                               "contentBlockIndex": 0}},
+        {"messageStop": {"stopReason": "tool_use"}},
+    ))
+    chunks = list(DeptBedrockChat().stream([HumanMessage("weather?")]))
+    merged = chunks[0]
+    for chunk in chunks[1:]:
+        merged = merged + chunk
+    assert merged.tool_calls == [
+        {"name": "get_weather", "args": {"city": "Paris"}, "id": "t1", "type": "tool_call"}
+    ]
+    assert merged.response_metadata["stop_reason"] == "tool_use"
+
+
+def test_stream_surfaces_usage_from_the_metadata_event(monkeypatch):
+    """A streamed response carries no usage headers; the counts arrive in the final
+    metadata event instead."""
+    monkeypatch.setattr(bedrock_chat, "_invoke", _stream_events(
+        {"contentBlockDelta": {"delta": {"text": "ok"}, "contentBlockIndex": 0}},
+        {"metadata": {"usage": {"inputTokens": 12, "outputTokens": 5, "totalTokens": 17}}},
+    ))
+    chunks = list(DeptBedrockChat().stream([HumanMessage("hi")]))
+    usage = [c.usage_metadata for c in chunks if c.usage_metadata]
+    assert usage == [{"input_tokens": 12, "output_tokens": 5, "total_tokens": 17}]
+
+
+def test_stream_midstream_failure_becomes_bedrock_proxy_error(monkeypatch):
+    """The proxy reports a failure that starts mid-stream as an error event, which
+    dwutils raises while iterating. A driver only catches BedrockProxyError."""
+    def fake_invoke(request, **kw):
+        def events():
+            yield {"contentBlockDelta": {"delta": {"text": "partial"}}}
+            raise RuntimeError("model stopped responding")
+        return events()
+
+    monkeypatch.setattr(bedrock_chat, "_invoke", fake_invoke)
+    with pytest.raises(BedrockProxyError):
+        list(DeptBedrockChat().stream([HumanMessage("hi")]))
+
+
+def test_stream_and_generate_send_the_same_request_shape(monkeypatch):
+    """_request is shared so the two paths cannot drift; only the stream flag differs."""
+    seen = []
+
+    def fake_invoke(request, **kw):
+        seen.append((request, kw.get("stream", False)))
+        if kw.get("stream"):
+            return [{"contentBlockDelta": {"delta": {"text": "ok"}}}]
+        return FakeResponse(_converse([{"text": "ok"}]))
+
+    monkeypatch.setattr(bedrock_chat, "_invoke", fake_invoke)
+    model = DeptBedrockChat().bind_tools([get_weather])
+    model.invoke([SystemMessage("be terse"), HumanMessage("hi")])
+    list(model.stream([SystemMessage("be terse"), HumanMessage("hi")]))
+
+    assert seen[0][0] == seen[1][0]
+    assert [streamed for _, streamed in seen] == [False, True]

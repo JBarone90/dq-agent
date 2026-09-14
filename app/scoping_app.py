@@ -41,7 +41,12 @@ from typing import Any
 
 import streamlit as st
 import yaml
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    HumanMessage,
+    ToolMessage,
+)
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
@@ -153,18 +158,28 @@ def _cache_usage(result: dict[str, Any] | None) -> tuple[int, int] | None:
     return (read, write) if seen else None
 
 
-def _session_cost(result: dict[str, Any] | None) -> float | None:
-    """Total $ across the transcript from response_metadata['cost_usd'], or None when no
-    message carries a cost — so the dev metric stays hidden rather than showing a wrong
-    $0 when the proxy isn't returning cost yet (see DeptBedrockChat._cost_usd)."""
+def _session_cost(result: dict[str, Any] | None) -> tuple[float, bool] | None:
+    """Total $ across the transcript from response_metadata['cost_usd'], with a flag
+    for whether every assistant turn was priced. None when no message carries a cost,
+    so the dev metric stays hidden rather than showing a wrong $0.
+
+    The flag matters because the proxy stamps `x-cost` only on non-streamed responses.
+    A session that streamed some turns would otherwise quietly total up a fraction of
+    what was actually spent, which is worse than showing nothing."""
     total = 0.0
-    seen = False
+    priced = unpriced = 0
     for msg in (result or {}).get("messages", []):
+        if not isinstance(msg, AIMessage):
+            continue
         meta = getattr(msg, "response_metadata", None) or {}
         if "cost_usd" in meta:
             total += meta["cost_usd"]
-            seen = True
-    return total if seen else None
+            priced += 1
+        else:
+            unpriced += 1
+    if not priced:
+        return None
+    return total, unpriced == 0
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -320,15 +335,41 @@ def _provenance_rows(draft: dict[str, Any], profile: dict[str, Any] | None) -> l
     return rows
 
 
+def _agent_tokens(graph: Any, graph_input: Any) -> Any:
+    """Yield assistant text as the graph produces it, for `st.write_stream`.
+
+    `stream_mode="messages"` emits (chunk, metadata) for every token the model
+    produces. Only the assistant's prose is yielded: tool-call chunks carry partial
+    JSON arguments, which are for the graph to assemble, not for a reader to watch.
+    The transcript is still rendered from checkpointed state afterwards, so this only
+    controls what the current turn looks like while it is in flight."""
+    for chunk, _meta in graph.stream(graph_input, _config(), stream_mode="messages"):
+        if isinstance(chunk, AIMessageChunk) and isinstance(chunk.content, str):
+            if chunk.content:
+                yield chunk.content
+
+
 def _invoke(graph_input: Any) -> None:
     """Advance the graph and store the result, or render a clear error and stop.
 
     A bedrock-proxy failure (bad token, model_id, or proxy URL) raises BedrockProxyError;
     catch it so the user sees the diagnostic message in the UI instead of Streamlit's raw
-    traceback box, and the existing transcript stays put for a retry."""
+    traceback box, and the existing transcript stays put for a retry. Streamed turns
+    raise the same type, including when the failure starts mid-stream.
+
+    After streaming, state is reloaded from the checkpointer rather than taken from a
+    return value: `graph.stream` yields message chunks, and a pending approval gate
+    only shows up in the persisted snapshot."""
     graph, _ = _resources()
     try:
-        st.session_state.result = graph.invoke(graph_input, _config())
+        if st.session_state.get("stream_responses", True):
+            with st.chat_message("assistant"):
+                st.write_stream(_agent_tokens(graph, graph_input))
+            st.session_state.result = (
+                _load_thread(st.session_state.thread_id) or st.session_state.result
+            )
+        else:
+            st.session_state.result = graph.invoke(graph_input, _config())
     except BedrockProxyError as exc:
         st.error(f"The model call failed.\n\n{exc}")
         st.stop()
@@ -396,6 +437,12 @@ def _sidebar(result: dict[str, Any] | None) -> bool:
         st.header("dq-agent · scoping")
         show_tools = st.toggle("Show tool calls", value=True)
         st.toggle(
+            "Stream responses",
+            value=True,
+            key="stream_responses",
+            help="Render the reply as it is produced. Streamed turns report no cost.",
+        )
+        st.toggle(
             "Plain-text code blocks",
             key="plain_code",
             help=(
@@ -421,7 +468,16 @@ def _sidebar(result: dict[str, Any] | None) -> bool:
 
         cost = _session_cost(result)
         if cost is not None:
-            st.metric("Session cost (dev)", f"${cost:.4f}")
+            spend, complete = cost
+            st.metric(
+                "Session cost (dev)",
+                f"${spend:.4f}" if complete else f">= ${spend:.4f}",
+            )
+            if not complete:
+                st.caption(
+                    "A floor, not the total: the proxy sends no cost header on a "
+                    "streamed response."
+                )
 
         usage = _daily_usage()
         if usage:

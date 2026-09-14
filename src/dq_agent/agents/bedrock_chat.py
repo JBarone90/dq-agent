@@ -24,18 +24,19 @@ unit tests run) anywhere. Tests monkeypatch `_invoke` to avoid the proxy.
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
+    AIMessageChunk,
     BaseMessage,
     HumanMessage,
     SystemMessage,
     ToolMessage,
 )
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
@@ -100,8 +101,17 @@ def _diagnose(request: dict[str, Any], exc: Exception) -> str:
     return "\n".join(lines)
 
 
-def _invoke(request: dict[str, Any], *, max_retries: int = DEFAULT_MAX_RETRIES) -> Any:
-    """Send one Converse request through the bedrock-proxy, returning the raw `Response`.
+def _invoke(
+    request: dict[str, Any],
+    *,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    stream: bool = False,
+) -> Any:
+    """Send one Converse request through the bedrock-proxy.
+
+    Returns the raw `Response`, or an iterator of raw Converse stream events when
+    `stream` is set. A streamed call can still fail *after* the iterator is handed
+    back, so the caller must translate errors raised while iterating as well.
 
     `simple=False` is what selects full-request mode; without it `invoke` treats a
     `request=` dict as a mistake and raises before any call is made. Retries for
@@ -122,6 +132,7 @@ def _invoke(request: dict[str, Any], *, max_retries: int = DEFAULT_MAX_RETRIES) 
         return bedrock.invoke(
             request=request,
             simple=False,
+            stream=stream,
             show_usage=False,
             max_retries=max_retries,
         )
@@ -301,6 +312,70 @@ def _header_int(headers: Any, name: str) -> int | None:
         return None
 
 
+def _chunk_from_event(event: dict[str, Any]) -> AIMessageChunk | None:
+    """Translate one raw Converse stream event into an AIMessageChunk.
+
+    Returns None for the events that carry nothing LangChain needs (`messageStart`,
+    `contentBlockStop`), so the caller can skip them without a second lookup.
+
+    Tool calls arrive in pieces: `contentBlockStart` names the tool and gives its id,
+    then a run of `contentBlockDelta` events streams its arguments as partial JSON
+    text. That is exactly LangChain's `tool_call_chunks` shape, and merging the chunks
+    (`reduce(add, chunks)`) is what parses the assembled JSON into `.tool_calls` -- so
+    nothing here needs to buffer or parse arguments itself. `contentBlockIndex` is the
+    index that keeps parallel tool calls apart while they interleave.
+    """
+    if "contentBlockStart" in event:
+        block = event["contentBlockStart"]
+        use = block.get("start", {}).get("toolUse")
+        if not use:
+            return None
+        return AIMessageChunk(
+            content="",
+            tool_call_chunks=[{
+                "name": use.get("name"),
+                "args": "",
+                "id": use.get("toolUseId"),
+                "index": block.get("contentBlockIndex", 0),
+                "type": "tool_call_chunk",
+            }],
+        )
+
+    if "contentBlockDelta" in event:
+        block = event["contentBlockDelta"]
+        delta = block.get("delta", {})
+        if "text" in delta:
+            return AIMessageChunk(content=delta["text"])
+        if "toolUse" in delta:
+            return AIMessageChunk(
+                content="",
+                tool_call_chunks=[{
+                    "name": None,
+                    "args": delta["toolUse"].get("input", ""),
+                    "id": None,
+                    "index": block.get("contentBlockIndex", 0),
+                    "type": "tool_call_chunk",
+                }],
+            )
+        return None
+
+    if "messageStop" in event:
+        return AIMessageChunk(
+            content="",
+            response_metadata={"stop_reason": event["messageStop"].get("stopReason")},
+        )
+
+    if "metadata" in event:
+        # Token counts arrive here rather than in headers: a streamed response carries
+        # no usage headers at all, which is also why cost is unavailable when streaming.
+        usage = _usage_metadata(event["metadata"].get("usage"))
+        if usage is None:
+            return None
+        return AIMessageChunk(content="", usage_metadata=usage)
+
+    return None
+
+
 class DeptBedrockChat(BaseChatModel):
     """Chat model that calls Bedrock (Claude) through the internal bedrock-proxy.
 
@@ -313,10 +388,12 @@ class DeptBedrockChat(BaseChatModel):
 
     - **Synchronous only.** Implements `_generate`; there is no `_agenerate` /
       `_astream`, so a high-concurrency web UI blocks a worker thread per call.
-    - **No streaming.** `_stream` is unimplemented — a full response is returned at
-      once, so a UI cannot render tokens as they are produced. The proxy does support
-      it (`bedrock.invoke(..., stream=True)`), so this is a gap in the adapter rather
-      than in the transport.
+    - **Streaming is supported.** `_stream` yields a chunk per Converse stream event,
+      so `.stream()` and LangGraph's `stream_mode="messages"` emit tokens as they are
+      produced. A streamed response carries no usage headers, so `cost_usd` and
+      `tokens_used` are absent from a streamed turn and anything totalling per-call
+      cost must treat such a session as incomplete; token counts still arrive, in the
+      final `metadata` event.
     - **Usage and cost are surfaced.** Token counts from the response `usage` block map
       onto `AIMessage.usage_metadata`; the proxy's per-call `x-cost` / `x-tokens-used`
       response headers map onto `response_metadata["cost_usd"]` / `["tokens_used"]` (see
@@ -341,13 +418,14 @@ class DeptBedrockChat(BaseChatModel):
     ) -> Runnable[Any, BaseMessage]:
         return self.bind(tools=_to_converse_tools(tools), **kwargs)
 
-    def _generate(
+    def _request(
         self,
-        messages: list[BaseMessage],
-        stop: list[str] | None = None,
-        run_manager: CallbackManagerForLLMRun | None = None,
-        **kwargs: Any,
-    ) -> ChatResult:
+        messages: Sequence[BaseMessage],
+        stop: list[str] | None,
+        tools: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        """Build the Converse request body. Shared by `_generate` and `_stream` so the
+        two cannot drift into sending differently shaped requests."""
         system, converse_messages = _to_converse(messages)
         inference: dict[str, Any] = {"maxTokens": self.max_tokens}
         if stop:
@@ -359,9 +437,18 @@ class DeptBedrockChat(BaseChatModel):
         }
         if system:
             request["system"] = system
-        if kwargs.get("tools"):
-            request["toolConfig"] = {"tools": kwargs["tools"]}
+        if tools:
+            request["toolConfig"] = {"tools": tools}
+        return request
 
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        request = self._request(messages, stop, kwargs.get("tools"))
         response = _invoke(request, max_retries=self.max_retries)
         try:
             data = response.json()
@@ -405,6 +492,43 @@ class DeptBedrockChat(BaseChatModel):
             response_metadata=metadata,
         )
         return ChatResult(generations=[ChatGeneration(message=message)])
+
+    def _stream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        """Stream one turn, yielding a chunk per Converse stream event.
+
+        Implementing this is what makes `.stream()` and LangGraph's
+        `stream_mode="messages"` emit tokens as they are produced; without it
+        LangChain falls back to `_generate` and hands back one chunk at the end.
+
+        A streamed response carries no usage headers, so `cost_usd` and `tokens_used`
+        are absent from a streamed turn -- token counts still arrive, in the final
+        `metadata` event. Anything summing per-call cost has to treat a streamed
+        session as incomplete rather than cheap.
+        """
+        request = self._request(messages, stop, kwargs.get("tools"))
+        events = _invoke(request, max_retries=self.max_retries, stream=True)
+        try:
+            for event in events:
+                chunk = _chunk_from_event(event)
+                if chunk is None:
+                    continue
+                generation = ChatGenerationChunk(message=chunk)
+                if run_manager and chunk.content:
+                    run_manager.on_llm_new_token(chunk.text, chunk=generation)
+                yield generation
+        except RuntimeError as exc:
+            # The proxy reports a mid-stream failure as an error event, which dwutils
+            # raises while iterating -- after the status code is long gone. Translate it
+            # here so a driver's `except BedrockProxyError` still covers streamed turns.
+            raise BedrockProxyError(
+                _diagnose(request, exc), getattr(exc, "status_code", None)
+            ) from exc
 
     @property
     def _llm_type(self) -> str:
