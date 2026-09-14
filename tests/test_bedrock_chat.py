@@ -227,6 +227,56 @@ def test_generate_includes_system_when_present(monkeypatch):
     assert captured["system"] == [{"text": "be terse"}]
 
 
+def test_generate_surfaces_cache_tokens_from_usage_block(monkeypatch):
+    """Converse reports cache counts alongside inputTokens, so they are added into
+    input_tokens and broken out under LangChain's input_token_details names."""
+    monkeypatch.setattr(
+        bedrock_chat, "_invoke",
+        lambda request, **kw: FakeResponse(_converse(
+            [{"text": "ok"}],
+            usage={"inputTokens": 100, "outputTokens": 5, "totalTokens": 105,
+                   "cacheReadInputTokens": 900, "cacheWriteInputTokens": 0},
+        )),
+    )
+    result = DeptBedrockChat().invoke([HumanMessage("hi")])
+    assert result.usage_metadata["input_tokens"] == 1000
+    assert result.usage_metadata["total_tokens"] == 1005
+    assert result.usage_metadata["input_token_details"] == {
+        "cache_read": 900, "cache_creation": 0,
+    }
+
+
+def test_generate_falls_back_to_cache_headers(monkeypatch):
+    """The proxy stamps cache counts on the response headers too; use them when the
+    Converse usage block does not carry the fields."""
+    monkeypatch.setattr(
+        bedrock_chat, "_invoke",
+        lambda request, **kw: FakeResponse(
+            _converse([{"text": "ok"}], usage={"inputTokens": 10, "outputTokens": 5}),
+            headers={"x-cache-read-tokens": "40", "x-cache-write-tokens": "2"},
+        ),
+    )
+    result = DeptBedrockChat().invoke([HumanMessage("hi")])
+    assert result.usage_metadata["input_token_details"] == {
+        "cache_read": 40, "cache_creation": 2,
+    }
+    assert result.usage_metadata["input_tokens"] == 52
+
+
+def test_generate_omits_cache_details_when_unreported(monkeypatch):
+    """No cache fields anywhere means "cannot see it", which must not render as a
+    zero that looks like a measured cache miss."""
+    monkeypatch.setattr(
+        bedrock_chat, "_invoke",
+        lambda request, **kw: FakeResponse(_converse(
+            [{"text": "ok"}], usage={"inputTokens": 10, "outputTokens": 5},
+        )),
+    )
+    result = DeptBedrockChat().invoke([HumanMessage("hi")])
+    assert "input_token_details" not in result.usage_metadata
+    assert result.usage_metadata["input_tokens"] == 10
+
+
 # --- defensive error handling --------------------------------------------
 
 

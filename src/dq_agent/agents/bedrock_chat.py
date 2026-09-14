@@ -206,23 +206,71 @@ def _to_converse_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
     return specs
 
 
-def _usage_metadata(usage: dict[str, Any] | None) -> dict[str, int] | None:
+def _cache_tokens(
+    usage: dict[str, Any] | None, headers: Any
+) -> tuple[int | None, int | None]:
+    """Prompt-cache token counts for one call, as (read, write).
+
+    Two sources report these and neither is guaranteed: the Converse `usage` block
+    (`cacheReadInputTokens` / `cacheWriteInputTokens`) and the proxy's own
+    `x-cache-read-tokens` / `x-cache-write-tokens` headers. The body is preferred
+    because it is Bedrock's own accounting; the headers are the fallback.
+
+    None means nothing reported the field at all, which is worth telling apart from
+    a reported zero: zero says caching is wired up and did not hit, None says we
+    cannot see it. Today every call returns zero or None, because the request sets
+    no cache points.
+    """
+    read = usage.get("cacheReadInputTokens") if usage else None
+    write = usage.get("cacheWriteInputTokens") if usage else None
+    if read is None:
+        read = _header_int(headers, "x-cache-read-tokens")
+    if write is None:
+        write = _header_int(headers, "x-cache-write-tokens")
+    return read, write
+
+
+def _usage_metadata(
+    usage: dict[str, Any] | None, headers: Any = None
+) -> dict[str, Any] | None:
     """Map the Converse response `usage` block to LangChain's UsageMetadata so
     `AIMessage.usage_metadata` carries token counts for cost/usage views.
 
     The `usage` block is part of the Bedrock response body and is independent of the
     proxy's `show_usage` print flag, so it is read straight from `.json()`. Converse
-    reports `totalTokens` itself rather than leaving it to be summed. Returns None when
-    absent, so a caller can tell "unknown" apart from a genuine zero."""
+    reports `totalTokens` itself rather than leaving it to be summed. Returns None
+    when absent, so a caller can tell "unknown" apart from a genuine zero.
+
+    Cache counts go into `input_token_details` under LangChain's own names
+    (`cache_read` / `cache_creation`). Converse reports them *alongside*
+    `inputTokens` rather than inside it, whereas LangChain's contract is that
+    `input_tokens` is the full input with the details as subsets, so they are added
+    in here. If the proxy ever folds them into `inputTokens` instead, this would
+    double-count; `response_metadata['tokens_used']` (the proxy's own total, from
+    `x-tokens-used`) is the cross-check that would show it.
+    """
     if not usage:
         return None
     input_tokens = usage.get("inputTokens", 0)
     output_tokens = usage.get("outputTokens", 0)
-    return {
-        "input_tokens": input_tokens,
+    total_tokens = usage.get("totalTokens", input_tokens + output_tokens)
+
+    cache_read, cache_write = _cache_tokens(usage, headers)
+    details: dict[str, int] = {}
+    if cache_read is not None:
+        details["cache_read"] = cache_read
+    if cache_write is not None:
+        details["cache_creation"] = cache_write
+    cached = (cache_read or 0) + (cache_write or 0)
+
+    metadata: dict[str, Any] = {
+        "input_tokens": input_tokens + cached,
         "output_tokens": output_tokens,
-        "total_tokens": usage.get("totalTokens", input_tokens + output_tokens),
+        "total_tokens": total_tokens + cached,
     }
+    if details:
+        metadata["input_token_details"] = details
+    return metadata
 
 
 def _header_cost(headers: Any) -> float | None:
@@ -274,7 +322,8 @@ class DeptBedrockChat(BaseChatModel):
       response headers map onto `response_metadata["cost_usd"]` / `["tokens_used"]` (see
       `_header_cost` — cost is the proxy's, never a hardcoded price table). Account-level
       daily budget is a separate call, `dwutils.bedrock.get_usage()`, not done here.
-      Cache-read/-write token fields are not captured.
+      Prompt-cache counts are captured too, under `usage_metadata["input_token_details"]`;
+      they stay at zero until the request sets cache points, which it does not yet.
     - **Retries belong to the proxy.** `dwutils.bedrock` retries throttling and dropped
       connections with backoff, honouring `Retry-After`; `max_retries` below is passed
       through to it. A failure that survives that is re-raised as `BedrockProxyError`
@@ -352,7 +401,7 @@ class DeptBedrockChat(BaseChatModel):
         message = AIMessage(
             content=text,
             tool_calls=tool_calls,
-            usage_metadata=_usage_metadata(data.get("usage")),
+            usage_metadata=_usage_metadata(data.get("usage"), response.headers),
             response_metadata=metadata,
         )
         return ChatResult(generations=[ChatGeneration(message=message)])

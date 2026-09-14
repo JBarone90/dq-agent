@@ -131,6 +131,27 @@ def _token_usage(result: dict[str, Any] | None) -> tuple[int, int]:
     return inp, out
 
 
+def _cache_usage(result: dict[str, Any] | None) -> tuple[int, int] | None:
+    """Prompt-cache tokens (read, write) summed across the transcript, or None when
+    no message reports them.
+
+    None keeps the metric hidden rather than showing a misleading 0/0 when the proxy
+    is not reporting cache counts at all. A real 0/0 is meaningful and does render:
+    it means the counts came through and nothing was cached, which is the expected
+    reading until the adapter starts setting cache points."""
+    read = write = 0
+    seen = False
+    for msg in (result or {}).get("messages", []):
+        details = (getattr(msg, "usage_metadata", None) or {}).get(
+            "input_token_details"
+        )
+        if details:
+            read += details.get("cache_read", 0)
+            write += details.get("cache_creation", 0)
+            seen = True
+    return (read, write) if seen else None
+
+
 def _session_cost(result: dict[str, Any] | None) -> float | None:
     """Total $ across the transcript from response_metadata['cost_usd'], or None when no
     message carries a cost — so the dev metric stays hidden rather than showing a wrong
@@ -336,6 +357,15 @@ def _sidebar(result: dict[str, Any] | None) -> bool:
         inp, out = _token_usage(result)
         st.metric("Tokens (in / out)", f"{inp} / {out}")
         st.caption("Summed from the Bedrock response usage.")
+
+        cache = _cache_usage(result)
+        if cache is not None:
+            cache_read, cache_write = cache
+            st.metric("Cache tokens (read / write)", f"{cache_read} / {cache_write}")
+            st.caption(
+                "Prompt-cache tokens reported by the proxy. Zero until the request "
+                "sets cache points."
+            )
 
         cost = _session_cost(result)
         if cost is not None:
