@@ -306,6 +306,49 @@ def step_7_prompt_cache() -> bool:
     return False
 
 
+def step_8_cache_ttl() -> None:
+    """Will the proxy take a 1-hour cache TTL?
+
+    The default entry lasts 5 minutes. The scoping agent pauses at the approval gate
+    for a human to read a contract, which routinely takes longer than that, so the
+    entry is often dead exactly when the conversation resumes. The proxy prices both
+    `cache_write_5m` and `cache_write_1h`, so a longer TTL is purchasable -- what is
+    not documented is how to ask for one.
+
+    This only establishes whether the request is *accepted*; confirming the entry
+    really survives an hour would mean waiting one out. Informational either way.
+    """
+    _hr("8. Cache TTL probe (is a 1-hour cachePoint accepted?)")
+    from dwutils import bedrock
+
+    filler = "You are a careful data quality assistant. " * 400
+    request = {
+        "model_id": MODEL_ID,
+        "system": [{"text": filler}, {"cachePoint": {"type": "default", "ttl": "1h"}}],
+        "messages": [{"role": "user", "content": [{"text": "Reply with exactly: one"}]}],
+        "inferenceConfig": {"maxTokens": 16},
+    }
+    try:
+        data = bedrock.invoke(request=request, simple=False, show_usage=False).json()
+    except bedrock.BedrockError as error:
+        print(f"  Rejected ({error.status_code}): {error.message}")
+        print("")
+        print("  So a 1-hour entry cannot be requested this way. Caching still works")
+        print("  at the 5-minute default; expect a miss on the turn after a long")
+        print("  pause at the approval gate.")
+        return
+
+    usage = data.get("usage", {})
+    print(
+        f"  accepted: cache_write={usage.get('cacheWriteInputTokens')} "
+        f"cache_read={usage.get('cacheReadInputTokens')}"
+    )
+    print("")
+    print("  PASS: the proxy accepts a ttl field. Worth using for the rolling cache")
+    print("  point so an entry survives the approval gate -- note it is priced at")
+    print("  cache_write_1h, which is 2x input rather than 1.25x.")
+
+
 def main() -> None:
     step_0_env()
     step_1_models()
@@ -320,6 +363,10 @@ def main() -> None:
         print(f"  Skipped: {error}")
     if not step_7_prompt_cache():
         sys.exit(1)
+    try:
+        step_8_cache_ttl()
+    except Exception as error:  # noqa: BLE001 - informational, like step 6
+        print(f"  Skipped: {error}")
     _hr("All checks passed — Bedrock proxy is ready for the scoping agent.")
 
 

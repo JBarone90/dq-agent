@@ -439,32 +439,36 @@ def _chunk_from_event(
 def _with_cache_points(request: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of `request` marked up for prompt caching.
 
-    Two markers. The first sits at the end of `system`: Converse assembles a request
-    as tools, then system, then messages, so a marker there covers the tool schema as
-    well, and neither is large enough to cache on its own.
+    One marker, at the end of the newest message. Because Converse assembles a
+    request as tools, then system, then messages, a marker there covers the whole
+    thing: tool schema, system prompt and transcript alike.
 
-    The second sits at the end of the last message, and is the one that earns its
-    keep. Each turn resends the previous turn's request plus a few new messages, so
-    last turn's stored entry is matched automatically and this turn stores a slightly
-    longer one. The window rolls forward with the conversation and nothing here has to
-    track which turn is which.
+    It rolls forward on its own. Each turn resends the previous turn's request plus a
+    few new messages, so last turn's stored prefix is matched automatically and this
+    turn stores a slightly longer one. Nothing here tracks which turn is which.
 
-    Reads need no marker: Bedrock matches the longest stored request it already holds
+    Reads need no marker: Bedrock matches the longest stored prefix it already holds
     and bills those tokens at the cache rate. A marker only says how much to store.
+
+    An earlier version also marked the end of `system`, to cache the static part
+    separately. Measured against the proxy that is dead weight: the static prefix is
+    ~1900 tokens against a 4096-token minimum on Sonnet 5, so it can never be stored
+    on its own -- and it gets cached anyway as part of this marker's longer prefix,
+    whose TTL is refreshed on every turn.
 
     The copy is shallow but never writes through to the caller's lists, so a request
     can be built once and marked up without the markers leaking into a retry."""
-    marked = dict(request)
-    if marked.get("system"):
-        marked["system"] = [*marked["system"], CACHE_POINT]
-    messages = marked.get("messages")
-    if messages:
-        last = messages[-1]
-        marked["messages"] = [
+    messages = request.get("messages")
+    if not messages:
+        return request
+    last = messages[-1]
+    return {
+        **request,
+        "messages": [
             *messages[:-1],
             {**last, "content": [*last["content"], CACHE_POINT]},
-        ]
-    return marked
+        ],
+    }
 
 
 class DeptBedrockChat(BaseChatModel):

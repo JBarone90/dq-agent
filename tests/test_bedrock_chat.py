@@ -232,9 +232,10 @@ def test_generate_includes_system_when_present(monkeypatch):
 # --- prompt caching ------------------------------------------------------
 
 
-def test_cache_points_mark_system_and_the_last_message(monkeypatch):
-    """One marker after system (which covers the tool schema, since Converse orders a
-    request tools-then-system-then-messages), one at the end of the transcript."""
+def test_the_only_cache_point_is_on_the_newest_message(monkeypatch):
+    """Converse orders a request tools-then-system-then-messages, so a marker on the
+    last message covers all three. A second marker on `system` would be dead weight:
+    the static prefix measures ~1900 tokens against a 4096-token cache minimum."""
     captured = {}
 
     def fake_invoke(request, **kw):
@@ -246,11 +247,10 @@ def test_cache_points_mark_system_and_the_last_message(monkeypatch):
         [SystemMessage("be terse"), HumanMessage("hi")]
     )
 
-    assert captured["system"] == [{"text": "be terse"}, bedrock_chat.CACHE_POINT]
     assert captured["messages"][-1]["content"] == [
         {"text": "hi"}, bedrock_chat.CACHE_POINT
     ]
-    # the tool schema is covered by the system marker, not one of its own
+    assert captured["system"] == [{"text": "be terse"}]
     assert bedrock_chat.CACHE_POINT not in captured["toolConfig"]["tools"]
 
 
@@ -288,7 +288,6 @@ def test_cache_prompt_off_sends_no_markers(monkeypatch):
     DeptBedrockChat(cache_prompt=False).invoke(
         [SystemMessage("be terse"), HumanMessage("hi")]
     )
-    assert captured["system"] == [{"text": "be terse"}]
     assert captured["messages"][-1]["content"] == [{"text": "hi"}]
 
 
@@ -300,9 +299,11 @@ def test_cache_points_do_not_leak_into_a_rebuilt_request(monkeypatch):
         "messages": [{"role": "user", "content": [{"text": "hi"}]}],
     }
     marked = bedrock_chat._with_cache_points(request)
-    assert marked["system"] == [{"text": "s"}, bedrock_chat.CACHE_POINT]
-    assert request["system"] == [{"text": "s"}]
+    assert marked["messages"][0]["content"] == [
+        {"text": "hi"}, bedrock_chat.CACHE_POINT
+    ]
     assert request["messages"][0]["content"] == [{"text": "hi"}]
+    assert request["system"] == [{"text": "s"}]
 
 
 def test_generate_surfaces_cache_tokens_from_usage_block(monkeypatch):
