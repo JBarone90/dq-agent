@@ -32,6 +32,7 @@ DeptBedrockChat limitations docstring).
 from __future__ import annotations
 
 import json
+import re
 import os
 import sqlite3
 import uuid
@@ -221,6 +222,48 @@ def _render_profile(report: dict[str, Any]) -> None:
         st.caption(f"{report['table']['row_count']:,} rows")
 
 
+_FENCE = re.compile(r"```[A-Za-z]*\n(.*?)```", re.DOTALL)
+
+
+def _plain_code() -> bool:
+    """True when code blocks should render without syntax highlighting.
+
+    Streamlit lazy-loads a 1.5 MB `StreamlitSyntaxHighlighter` chunk the first time a
+    page renders `st.code`, `st.json`, or a fenced block inside `st.markdown`. Some
+    locked-down networks never deliver a chunk that size, and the component then dies
+    with "Failed to fetch dynamically imported module" - which lands squarely on the
+    approval gate, where the contract YAML has to be readable for the gate to mean
+    anything. This drops to `st.text`, which needs no chunk at all."""
+    return bool(st.session_state.get("plain_code"))
+
+
+def _code(text: str, language: str | None = None) -> None:
+    """A code block that degrades to plain text when the highlighter cannot load."""
+    if _plain_code():
+        st.text(text)
+    else:
+        st.code(text, language=language)
+
+
+def _markdown(text: str) -> None:
+    """`st.markdown`, but in plain mode fenced blocks are peeled out and rendered as
+    text, so the surrounding prose still renders as markdown and the highlighter chunk
+    is never requested."""
+    if not _plain_code():
+        st.markdown(text)
+        return
+    pos = 0
+    for match in _FENCE.finditer(text):
+        before = text[pos:match.start()]
+        if before.strip():
+            st.markdown(before)
+        st.text(match.group(1).rstrip())
+        pos = match.end()
+    tail = text[pos:]
+    if tail.strip():
+        st.markdown(tail)
+
+
 def _render_transcript(result: dict[str, Any] | None, show_tools: bool) -> None:
     for msg in (result or {}).get("messages", []):
         if isinstance(msg, HumanMessage):
@@ -234,7 +277,7 @@ def _render_transcript(result: dict[str, Any] | None, show_tools: bool) -> None:
                 with st.chat_message("assistant"):
                     for call in msg.tool_calls:
                         with st.expander(f"🔧 tool call · {call['name']}", expanded=False):
-                            st.json(call["args"])
+                            _code(json.dumps(call["args"], indent=2), "json")
         elif isinstance(msg, ToolMessage) and show_tools:
             report = _as_profile(str(msg.content))
             with st.chat_message("assistant"):
@@ -245,7 +288,7 @@ def _render_transcript(result: dict[str, Any] | None, show_tools: bool) -> None:
                     with st.expander(
                         f"📤 tool result · {msg.name or msg.tool_call_id}", expanded=False
                     ):
-                        st.code(str(msg.content))
+                        _code(str(msg.content))
 
 
 # --- approval gate -------------------------------------------------------
@@ -309,7 +352,7 @@ def _render_gate(payload: dict[str, Any], profile: dict[str, Any] | None) -> Non
 
     st.divider()
     st.subheader("Approval requested")
-    st.markdown(request.get("description", "(no description)"))
+    _markdown(request.get("description", "(no description)"))
 
     with st.expander("🔎 Why these rules? (profile signals)"):
         st.dataframe(
@@ -352,6 +395,15 @@ def _sidebar(result: dict[str, Any] | None) -> bool:
     with st.sidebar:
         st.header("dq-agent · scoping")
         show_tools = st.toggle("Show tool calls", value=True)
+        st.toggle(
+            "Plain-text code blocks",
+            key="plain_code",
+            help=(
+                "Turn on if code blocks fail with 'Failed to fetch dynamically "
+                "imported module'. Streamlit's syntax highlighter is a 1.5 MB lazy "
+                "chunk that some restricted networks will not deliver."
+            ),
+        )
         st.caption(f"thread `{st.session_state.thread_id}`")
 
         inp, out = _token_usage(result)
