@@ -589,3 +589,32 @@ def test_non_streamed_cost_is_labelled_as_the_proxys(monkeypatch):
     result = DeptBedrockChat().invoke([HumanMessage("hi")])
     assert result.response_metadata["cost_usd"] == 0.0034
     assert result.response_metadata["cost_source"] == "proxy"
+
+
+def test_cache_point_asks_for_the_one_hour_ttl():
+    """The agent pauses at the approval gate for longer than the 5m default, so an
+    unqualified cache point would expire exactly when the conversation resumes."""
+    assert bedrock_chat.CACHE_POINT == {
+        "cachePoint": {"type": "default", "ttl": "1h"}
+    }
+
+
+def test_cache_writes_are_priced_at_the_ttl_we_ask_for(monkeypatch):
+    """Pricing a 1-hour write at the 5-minute rate would under-report every session,
+    so the rate has to follow CACHE_TTL rather than being pinned to 5m."""
+    monkeypatch.setitem(bedrock_chat._PRICING, bedrock_chat.DEFAULT_MODEL_ID, _PRICES | {
+        "cache_write_1h": 4.4,
+    })
+    monkeypatch.setattr(bedrock_chat, "_invoke", _stream_events(
+        {"metadata": {"usage": {
+            "inputTokens": 0, "outputTokens": 0, "cacheWriteInputTokens": 1_000_000,
+        }}},
+    ))
+    chunk = list(DeptBedrockChat().stream([HumanMessage("hi")]))[0]
+    assert chunk.response_metadata["cost_usd"] == pytest.approx(4.4)
+
+
+def test_write_rate_falls_back_when_the_ttl_is_not_priced():
+    """A model that prices only the 5m write must not silently cost nothing."""
+    assert bedrock_chat._write_rate({"cache_write_5m": 2.75}) == 2.75
+    assert bedrock_chat._write_rate({}) == 0.0

@@ -42,7 +42,19 @@ from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
 DEFAULT_MODEL_ID = "eu.anthropic.claude-sonnet-5"
-CACHE_POINT = {"cachePoint": {"type": "default"}}
+CACHE_TTL = "1h"
+"""How long a cache entry lives. The proxy offers "5m" and "1h" at different prices.
+
+1h is the right default here because the agent pauses at the approval gate for a
+human to read a contract, which routinely runs past five minutes -- and an expired
+entry means re-writing the whole transcript rather than extending it. Writes cost 2x
+input at this TTL against 1.25x at 5m, but they apply to the few new tokens each turn
+adds, whereas an expiry re-writes everything.
+
+Changing this means changing the rate `_computed_cost` prices writes at, below.
+"""
+
+CACHE_POINT = {"cachePoint": {"type": "default", "ttl": CACHE_TTL}}
 """Marks how far back a request should be cached. See `DeptBedrockChat.cache_prompt`."""
 
 DEFAULT_MAX_RETRIES = 3
@@ -339,6 +351,14 @@ def _pricing(model_id: str) -> dict[str, float] | None:
     return prices
 
 
+def _write_rate(prices: dict[str, float]) -> float:
+    """The per-million price of a cache write at the TTL we actually ask for.
+
+    Kept next to CACHE_TTL because the two have to move together: pricing a 1-hour
+    write at the 5-minute rate would quietly under-report every session."""
+    return prices.get(f"cache_write_{CACHE_TTL}", prices.get("cache_write_5m", 0.0))
+
+
 def _computed_cost(model_id: str, usage: dict[str, Any] | None) -> float | None:
     """Dollar cost of one call, worked out from token counts and the proxy's prices.
 
@@ -357,7 +377,7 @@ def _computed_cost(model_id: str, usage: dict[str, Any] | None) -> float | None:
         usage.get("inputTokens", 0) * prices.get("input", 0.0)
         + usage.get("outputTokens", 0) * prices.get("output", 0.0)
         + usage.get("cacheReadInputTokens", 0) * prices.get("cache_read", 0.0)
-        + usage.get("cacheWriteInputTokens", 0) * prices.get("cache_write_5m", 0.0)
+        + usage.get("cacheWriteInputTokens", 0) * _write_rate(prices)
     )
     return charged / 1e6
 
