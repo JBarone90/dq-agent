@@ -58,6 +58,11 @@ class Registry:
             raise KeyError(f"rule '{rule_id}' not found in registry")
         return self._rules[rule_id]
 
+    def describe_unlisted(self, expectation_type: str) -> RuleDefinition:
+        """The same GX-derived description for an expectation the allowlist lacks — what
+        creative mode needs to fill in a proposal's kwargs."""
+        return _from_gx(expectation_type, {})
+
     @property
     def rule_ids(self) -> list[str]:
         return list(self._rules.keys())
@@ -97,7 +102,7 @@ def _from_gx(name: str, ours: dict[str, Any]) -> RuleDefinition:
         description=(impl.__doc__ or name).strip().splitlines()[0],
         tags=ours.get("tags", []),
         kwargs=kwargs,
-        required=sorted(dq_validation.ALLOWED_EXPECTATIONS[name]),
+        required=sorted(dq_validation.ALLOWED_EXPECTATIONS.get(name, frozenset())),
         notes=ours.get("notes"),
         summary=ours.get("summary"),
     )

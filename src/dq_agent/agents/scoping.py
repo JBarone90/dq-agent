@@ -34,9 +34,9 @@ from langgraph.types import Command, interrupt
 from pydantic import field_validator
 
 from dataflow_kit import dq_validation
-from dq_agent import connectors, profiler
+from dq_agent import connectors, profiler, proposals
 from dq_agent.models import Contract, Expectation
-from dq_agent.registry import Registry
+from dq_agent.registry import Registry, RuleDefinition
 from dq_agent.report import describe_contract
 
 DEFAULT_REGISTRY_FILE = Path("registry/expectations.yaml")
@@ -78,7 +78,9 @@ class ProposedExpectation(Expectation):
         return value
 
 
-def _make_tools(registry: Registry) -> list:
+def _make_tools(
+    registry: Registry, proposals_dir: Path = proposals.DEFAULT_PROPOSALS_DIR
+) -> list:
     @tool
     def profile_dataset(
         path: str, tool_call_id: Annotated[str, InjectedToolCallId]
@@ -159,22 +161,7 @@ def _make_tools(registry: Registry) -> list:
             rule = registry.get(rule_id)
             if tags and not set(tags) & set(rule.tags):
                 continue
-            kwargs = "\n".join(
-                f"    {name}"
-                + (f" ({spec.type})" if spec.type else "")
-                + (" [required]" if name in rule.required else "")
-                + (f" — {spec.description}" if spec.description else "")
-                + (f" Default: {spec.default!r}."
-                   if spec.default is not None and name not in rule.required
-                   and "default" not in (spec.description or "").lower() else "")
-                for name, spec in rule.kwargs.items()
-            )
-            lines.append(
-                f"- {rule.id} [{', '.join(rule.tags)}]\n"
-                f"  {rule.description}\n"
-                + (f"  Notes: {rule.notes}\n" if rule.notes else "")
-                + f"  kwargs:\n{kwargs}"
-            )
+            lines.append(_format_rule(rule))
         return "\n".join(lines) or "no rules match those tags"
 
     @tool
@@ -209,12 +196,10 @@ def _make_tools(registry: Registry) -> list:
                 )
             ]})
 
-        target = table or state.get("source_table")
-        if not target or target.count(".") != 1:
+        target = _target_table(table, state)
+        if target is None:
             return Command(update={"messages": [ToolMessage(
-                "error: which Postgres table will this contract run against? Ask the "
-                "owner and pass it as table='schema.table'",
-                tool_call_id=tool_call_id,
+                _NO_TARGET, tool_call_id=tool_call_id
             )]})
 
         schema, name = target.split(".")
@@ -248,7 +233,92 @@ def _make_tools(registry: Registry) -> list:
         confirmation first."""
         # never executed: the graph routes this call to the approval node
 
-    return [profile_dataset, profile_table, list_rules, propose_contract, request_approval]
+    @tool
+    def list_unlisted_expectations(expectation_type: str | None = None) -> str:
+        """Creative mode, step 1. Use only when the owner needs a check that no
+        expectation from list_rules can express. Without arguments, lists every Great
+        Expectations expectation that is NOT allowed in contracts yet, with a one-line
+        description and whether it is known to run on Postgres. Pass one
+        expectation_type to see its kwargs, as documented by GX."""
+        unlisted = {u.expectation_type: u for u in proposals.unlisted_expectations()}
+        if expectation_type is None:
+            return "\n".join(
+                f"- {u.expectation_type} — {u.description} (Postgres: {u.sql_support})"
+                for u in unlisted.values()
+            )
+        if expectation_type not in unlisted:
+            return (f"error: '{expectation_type}' is not an unlisted GX expectation "
+                    "(it is either already allowed — see list_rules — or does not exist)")
+        rule = registry.describe_unlisted(expectation_type)
+        return (_format_rule(rule)
+                + f"\n  Postgres: {unlisted[expectation_type].sql_support}")
+
+    @tool
+    def propose_new_expectation(
+        expectation_type: str,
+        rationale: str,
+        example_kwargs: dict[str, Any],
+        example_pass: str,
+        example_fail: str,
+        state: Annotated[dict, InjectedState],
+        table: str | None = None,
+    ) -> str:
+        """Creative mode, step 2. Record a proposal for a developer to add an unlisted
+        Great Expectations expectation to the allowlist. It is NOT added to the
+        contract and never runs until a developer promotes it.
+
+        rationale: the owner's need in plain English. example_kwargs: the kwargs this
+        table would use (validated against GX). example_pass / example_fail: short
+        invented illustrations of a passing and a failing value — never real data.
+        table: 'schema.table', omitted when the dataset was profiled with profile_table.
+        """
+        target = _target_table(table, state)
+        if target is None:
+            return _NO_TARGET
+        errors = proposals.proposal_errors(expectation_type, example_kwargs)
+        if errors:
+            return "invalid proposal: " + "; ".join(errors)
+        path = proposals.write_proposal(proposals.new_proposal(
+            dataset=target,
+            expectation_type=expectation_type,
+            rationale=rationale,
+            example_kwargs=example_kwargs,
+            example_pass=example_pass,
+            example_fail=example_fail,
+        ), proposals_dir)
+        return (f"proposal saved to {path} for developer review. Tell the owner this check "
+                "is not part of the contract: it will be available once a developer "
+                "promotes it. Continue with the contract as it is.")
+
+    return [profile_dataset, profile_table, list_rules, propose_contract,
+            list_unlisted_expectations, propose_new_expectation, request_approval]
+
+
+_NO_TARGET = ("error: which Postgres table is this for? Ask the owner and pass it as "
+              "table='schema.table'")
+
+
+def _target_table(table: str | None, state: dict) -> str | None:
+    """The contract's Postgres table: given explicitly, else the one that was profiled."""
+    target = table or state.get("source_table")
+    return target if target and target.count(".") == 1 else None
+
+
+def _format_rule(rule: RuleDefinition) -> str:
+    kwargs = "\n".join(
+        f"    {name}"
+        + (f" ({spec.type})" if spec.type else "")
+        + (" [required]" if name in rule.required else "")
+        + (f" — {spec.description}" if spec.description else "")
+        + (f" Default: {spec.default!r}."
+           if spec.default is not None and name not in rule.required
+           and "default" not in (spec.description or "").lower() else "")
+        for name, spec in rule.kwargs.items()
+    )
+    return (f"- {rule.id} [{', '.join(rule.tags)}]\n"
+            f"  {rule.description}\n"
+            + (f"  Notes: {rule.notes}\n" if rule.notes else "")
+            + f"  kwargs:\n{kwargs}")
 
 
 def _confirm_range_bounds(expectations: list[Expectation], table: str) -> list[str]:
@@ -412,11 +482,12 @@ def build_graph(
     model: BaseChatModel | None = None,
     registry: Registry | None = None,
     contracts_dir: Path | str = DEFAULT_CONTRACTS_DIR,
+    proposals_dir: Path | str = proposals.DEFAULT_PROPOSALS_DIR,
     checkpointer: Any = None,
 ):
     """Compile the scoping graph. All collaborators are injectable for tests;
     defaults serve the localhost demo (model from $DQ_AGENT_MODEL, repo-root
-    registry and contracts directories)."""
+    registry, contracts and proposals directories)."""
     if model is None:
         # Branch note: this diverges from main on purpose. The work environment is
         # air-gapped and reaches Bedrock only through the internal bedrock-proxy, so
@@ -434,7 +505,7 @@ def build_graph(
     if registry is None:
         registry = Registry(DEFAULT_REGISTRY_FILE)
 
-    tools = _make_tools(registry)
+    tools = _make_tools(registry, Path(proposals_dir))
     model = model.bind_tools(tools)
 
     def agent(state: ScopingState) -> dict:

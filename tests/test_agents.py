@@ -443,3 +443,41 @@ def test_streamed_run_still_pauses_on_the_approval_interrupt(
     assert action["name"] == "approve_contract"
     assert "```yaml" in action["description"]
     assert not list(tmp_path.glob("*.yaml")), "nothing persists before approval"
+
+
+# --- creative mode --------------------------------------------------------
+
+
+def test_list_unlisted_expectations_shows_gx_docs(tools):
+    catalogue = tools["list_unlisted_expectations"].invoke({})
+    assert "expect_column_value_lengths_to_be_between" in catalogue
+    assert "expect_column_values_to_be_unique" not in catalogue  # already allowed
+    detail = tools["list_unlisted_expectations"].invoke(
+        {"expectation_type": "expect_column_value_lengths_to_be_between"}
+    )
+    assert "min_value" in detail and "Postgres: supported" in detail
+
+
+def test_propose_new_expectation_writes_proposal_not_draft(registry, tmp_path):
+    tools = {t.name: t for t in _make_tools(registry, tmp_path)}
+    message = tools["propose_new_expectation"].invoke({
+        "expectation_type": "expect_column_value_lengths_to_be_between",
+        "rationale": "postcodes are 6-8 characters",
+        "example_kwargs": {"column": "postcode", "min_value": 6, "max_value": 8},
+        "example_pass": "SW1A 1AA",
+        "example_fail": "SW1",
+        "table": "synthetic.orders",
+        "state": {},
+    })
+    assert "not part of the contract" in message
+    assert len(list(tmp_path.glob("*.yaml"))) == 1  # a proposal file, nothing else
+
+
+def test_propose_new_expectation_rejects_allowed_one(tools, tmp_path):
+    message = tools["propose_new_expectation"].invoke({
+        "expectation_type": "expect_column_values_to_be_unique",
+        "rationale": "x", "example_kwargs": {"column": "id"},
+        "example_pass": "1", "example_fail": "1, 1",
+        "table": "synthetic.orders", "state": {},
+    })
+    assert "already allowed" in message

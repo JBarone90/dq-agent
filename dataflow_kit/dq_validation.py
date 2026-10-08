@@ -171,18 +171,24 @@ def expectation_errors(index: int, expectation: Any) -> list[str]:
     if not isinstance(kwargs, dict):
         return errors + [f"{where}: kwargs must be a mapping"]
 
-    allowed = allowed_kwargs(kind)
-    for name in sorted(kwargs.keys() - set(allowed), key=str):
-        errors.append(f"{where}: unexpected kwarg '{name}' (allowed: {', '.join(allowed)})")
-    for name in sorted(ALLOWED_EXPECTATIONS[kind] - kwargs.keys()):
-        errors.append(f"{where}: missing required kwarg '{name}'")
-    errors += [f"{where}: {problem}" for problem in _policy_errors(kind, kwargs)]
-    if not errors:
-        # GX's own checks: required kwargs, value types, value ranges
-        errors += [f"{where}: {problem}" for problem in _gx_errors(kind, kwargs)]
-
+    errors += [f"{where}: {problem}" for problem in kwarg_errors(kind, kwargs)]
     if "meta" in expectation:
         errors += _meta_errors(where, expectation["meta"])
+    return errors
+
+
+def kwarg_errors(kind: str, kwargs: dict[str, Any]) -> list[str]:
+    """Problems with an expectation's kwargs: unknown or forbidden names, our policy rules,
+    then GX's own checks. Works for any GX expectation, allowed or not."""
+    allowed = allowed_kwargs(kind)
+    errors = [f"unexpected kwarg '{name}' (allowed: {', '.join(allowed)})"
+              for name in sorted(kwargs.keys() - set(allowed), key=str)]
+    errors += [f"missing required kwarg '{name}'"
+               for name in sorted(ALLOWED_EXPECTATIONS.get(kind, frozenset()) - kwargs.keys())]
+    errors += _policy_errors(kind, kwargs)
+    if not errors:
+        # GX's own checks: required kwargs, value types, value ranges
+        errors += _gx_errors(kind, kwargs)
     return errors
 
 
