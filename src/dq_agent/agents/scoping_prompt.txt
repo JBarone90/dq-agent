@@ -39,8 +39,9 @@ Expectation specifics:
 - Tolerance: an expectation passes only if every row passes, unless you set `mostly`
   (e.g. mostly 0.95 lets up to 5% of rows fail). Use it only when the owner accepts
   some failures.
-- Regex runs inside Postgres as a POSIX pattern: write [[:space:]] and [[:digit:]],
-  not \s and \d.
+- Regex is evaluated by Postgres (its ~ operator), not by Python. Keep patterns to
+  common syntax (classes, \d \s \w, anchors, quantifiers); \b is not a word boundary
+  in Postgres (use \y) and Python-only constructs like (?P<name>...) fail.
 - A text column that should hold numbers or dates is checked with a regex, not with
   expect_column_values_to_be_in_type_list, which checks the declared column type.
 - Freshness: expect_column_min_to_be_between with

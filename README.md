@@ -177,7 +177,7 @@ The toolkit is two layers. The **run side** executes checks with no LLM involved
 
 **Which expectations and kwargs a contract may use.** `dataflow_kit/dq_validation.py` is the enforcement point, and it leans on GX itself: `ALLOWED_EXPECTATIONS` lists the permitted expectation names; the kwargs each one may take are GX's own domain and success keys minus a few forbidden ones (`row_condition`, `result_format`, …); GX's `validate_configuration` checks the values; and a handful of policy rules cover what GX lets through (unknown kwargs, an empty `value_set`, a missing `regex`, a range with no bound, any `$PARAMETER` other than the freshness form). A contract therefore cannot smuggle in arbitrary classes, actions or code.
 
-The agent's catalogue is built from the same source at startup: for each allowed name, `registry.py` reads the expectation's docstring (description and per-kwarg documentation), its kwargs and defaults from GX. `registry/expectations.yaml` adds only what GX cannot know: tags, a plain-English `summary` for the approval gate, and usage notes such as "regex is POSIX on Postgres".
+The agent's catalogue is built from the same source at startup: for each allowed name, `registry.py` reads the expectation's docstring (description and per-kwarg documentation), its kwargs and defaults from GX. `registry/expectations.yaml` adds only what GX cannot know: tags, a plain-English `summary` for the approval gate, and usage notes such as "regex is evaluated by Postgres, not Python".
 
 #### Contract
 

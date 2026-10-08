@@ -25,7 +25,7 @@ Never restate kwargs, types or descriptions anywhere else — that is the duplic
 2. Check what GX would let through for it (`ExpectationConfiguration` + `validate_configuration` in a REPL) and extend `_policy_errors` generically if needed — prefer a rule that applies to every expectation over a per-name branch.
 3. Optionally add `registry/expectations.yaml` notes:
    - `summary` is shown to a non-engineer at the approval gate. Placeholders are kwarg names; a missing kwarg renders as "no limit", a list as comma-separated values, and `mostly < 1` adds "(for at least N% of rows)". Do not expose raw regexes or code.
-   - `notes` is read by the LLM: when to use it, and backend caveats GX's docstring does not mention (e.g. POSIX regex on Postgres).
+   - `notes` is read by the LLM: when to use it, and backend caveats GX's docstring does not mention (e.g. regex is evaluated by Postgres, not Python).
 4. Run it once against a real Postgres table with GX 0.18.2 before relying on it.
 
 ## Constraints

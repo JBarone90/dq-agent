@@ -32,9 +32,10 @@ expect_column_values_to_match_regex:
   tags: [validity, conformance]
   summary: "`{column}` must match the expected text format"
   notes: >-
-    On Postgres the regex runs inside the database as a POSIX pattern (the ~ operator): write
-    [[:space:]] and [[:digit:]], not \s and \d. Also the way to check that a text column holds
-    numbers or dates. regex is required.
+    GX sends the pattern to Postgres (the ~ operator), so Postgres regex syntax applies, not
+    Python's. Common syntax works (classes, \d \s \w, anchors, quantifiers); \b is not a word
+    boundary there (use \y) and Python-only constructs like (?P<name>...) fail. Also the way to
+    check that a text column holds numbers or dates. regex is required.
 
 expect_table_row_count_to_be_between:
   tags: [volume]
