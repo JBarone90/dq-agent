@@ -173,8 +173,8 @@ a dataset with an unusual pattern; proposal file is readable and actionable by a
 
 `report.describe_contract()` renders a contract as plain English for the approval gate, but it does so with a per-`rule_id` `if/elif` chain. That couples the renderer to the rule catalogue: adding a rule to `registry/rules/` requires editing `report.py` to phrase it well, which cuts against the registry invariant ("adding a rule is just YAML + a function, never a core-code change"). It degrades gracefully today (unknown rules fall back to the registry name), so this is a scalability cleanup, not a bug.
 
-- [ ] Move phrasing into the rule YAML as an optional `summary` template field (e.g. `` "`{column}` must never be empty" ``); `describe_contract` renders it generically via `str.format(**params)`, falling back to rule name + params when absent. New rules then ship their own description with no `report.py` edit.
-- [ ] Decide how to handle the few rules whose phrasing is conditional on a value (`null_check` at `max_null_rate: 0` vs. > 0; `range_check` one bound vs. two) — either accept blunter unconditional wording or keep a tiny override map only for those.
+- [x] Move phrasing into the rule YAML as an optional `summary` template field (e.g. `` "`{column}` must never be empty" ``); `describe_contract` renders it generically via `str.format(**params)`, falling back to rule name + params when absent. New rules then ship their own description with no `report.py` edit.
+- [x] Decide how to handle the few rules whose phrasing is conditional on a value (`null_check` at `max_null_rate: 0` vs. > 0; `range_check` one bound vs. two) — either accept blunter unconditional wording or keep a tiny override map only for those.
 - [ ] Optional, creative-mode-adjacent: a small agent that *drafts* the `summary` template when a developer adds a rule, for human review before it is frozen as config. LLM at authoring time only.
 
 Explicitly out of scope: an LLM that translates the contract *at the approval gate* (runtime). The approval card is the surface a human reads to decide whether to approve, so it must faithfully represent the contract — a generated summary could drop a rule or misstate a threshold, and it adds nondeterminism, latency, and another redaction surface to a safety-critical gate. Keep the LLM at authoring time, never in the render/approval path.
@@ -208,10 +208,8 @@ Planned characteristics:
 - **No rule is ever executed without human approval of the contract.**
 - **The registry is the differentiator.** Invest in rule quality, tagging, and parameterization.
   A weak registry makes the agent unreliable regardless of prompt quality.
-- **Own the contract format.** The canonical rule contract is a clean, expressive YAML
-  defined by this tool. Export adapters to Great Expectations or Soda can be added later
-  as optional plugins if there is real demand — their schemas should not constrain phase 1
-  rule design.
+- ~~**Own the contract format.**~~ Superseded 2026-10-08: contracts are Great Expectations
+  0.18.2-native (see the design decision below).
 
 ---
 
@@ -279,6 +277,20 @@ checkpointer implicitly; an in-process driver must compile the graph with its ow
 contract is produced. `MemorySaver` for an ephemeral run, `SqliteSaver` (`langgraph-checkpoint-
 sqlite`) for a resumable one.
 
+
+**Execution moves to Great Expectations in data-flow (2026-10-08, `feat/gx-contracts`).** At work, pipelines can only run as Airflow DAGs in the `data-flow` repo, and the department implicitly standardises on Great Expectations, pinned to 0.18.2, with validation results persisted through a GX validation store and shown on the pipeline monitoring dashboard. Running a parallel Polars engine would duplicate that, so the engine and rule functions are retired (kept on `feat/bedrock-proxy-adapter`) and the contract becomes a GX-native suite in a small envelope (`contract_version`, `gx_version`, `dataset.schema/table`, `approval`, `suite`). This reverses the "own the contract format" constraint. A data quality check in data-flow has three parts, two constant and one per table:
+- **constant:** `dq_validation.py` — allowlist, contract loading/validation, in-memory suite + checkpoint, raise on failure;
+- **constant:** an Airflow DAG — the pilot is a standalone validation-only DAG; integrating after a sync task (`sync >> check`) comes later;
+- **per table:** `dq_contracts/<schema>.<table>.yaml`, produced by the scoping agent and approved by the owner.
+
+Both constant parts are staged in `dataflow_kit/` and copied into data-flow by hand; the footprint there is kept deliberately minimal (no scripts, data-flow-side tests postponed). The allowlist in `dq_validation.py` is the single definition of validity: dq-agent's `Contract.problems()` calls it, and `registry/rules/` mirrors it under a parity test. All 8 previous rules have GX equivalents: null → `expect_column_values_to_not_be_null` (`mostly` = 1 − max null rate), unique, allowed values → `_be_in_set`, range → `_be_between`, regex → `_match_regex` (POSIX on Postgres), row count → `expect_table_row_count_to_be_between`, type → `expect_column_values_to_be_in_type_list` (declared column type; text-encoded types go through regex), freshness → `expect_column_min_to_be_between` with `{"$PARAMETER": "now() - timedelta(days=N)"}` (verified to evaluate in 0.18.2). Dropped with the engine: per-rule severity (any failure fails the task), the `columns` schema-drift snapshot, and the run report (results go to the GX store and dashboard). The harness now scores proposals structurally by `(expectation_type, column)`.
+
+Open items for the data-flow pilot:
+- [ ] Confirm Airflow and worker Python versions (GX 0.18.2 needs ≤ 3.11), where DAGs and the `dataflow` package live, `default_args` conventions, and whether a manual-trigger DAG is acceptable
+- [ ] Copy the kit, scope a real, well-known table with `profile_table`, run the example DAG: one passing run, one deliberately failing run
+- [ ] Verify where the validation result is persisted (the README's `dataflow.ge_validation_store` was not visible from an interactive SQL session — do not assume it exists)
+- [ ] Tests for `dq_validation.py` (malformed contracts, allowlist rejections, pass/fail against a table)
+- [ ] Schema drift: add `expect_table_columns_to_match_set` to the allowlist to replace the dropped `columns` snapshot
 ---
 
 ## Tech Stack (Initial)
@@ -292,7 +304,8 @@ sqlite`) for a resumable one.
 | Dev/demo LLM         | Bedrock proxy (`DeptBedrockChat`) | Air-gapped default on this branch: Anthropic-on-Bedrock via the internal `dwutils.bedrock` proxy; `DQ_AGENT_MODEL` picks the Bedrock model id (`main` uses Gemini free tier) |
 | Data layer           | Polars             | Fast, memory-efficient, clean API; consistent interface across CSV and DB connectors |
 | DB connector         | ConnectorX or ADBC | Polars-native Postgres ingestion                                                     |
-| Rule/contract format | YAML               | Human-readable, diffable, versionable                                                |
+| Rule/contract format | YAML (GX 0.18.2-native) | Human-readable, diffable, versionable; runs unchanged in data-flow              |
+| Execution            | Great Expectations 0.18.2 in Airflow (`data-flow`) | The department standard; replaced the Polars engine on `feat/gx-contracts` |
 | Scoping interface    | CLI + Streamlit    | Air-gapped/no-npm: in-process driver compiles the graph with its own checkpointer (agent-chat-ui dropped on `feat/bedrock-proxy-adapter`) |
 | Testing              | pytest             | Standard                                                                             |
 

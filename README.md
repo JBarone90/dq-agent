@@ -3,26 +3,28 @@
 [![tests](https://github.com/JBarone90/dq-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/JBarone90/dq-agent/actions/workflows/tests.yml)
 
 
-**dq-agent is a Python toolkit for defining and running data-quality checks on a dataset.** You point it at your data and describe its business context; it profiles the data and helps you assemble a **contract** — a list of quality rules with parameters. You approve the contract once, and from then on it runs **deterministically** on every pipeline run, returning pass/fail per rule.
+**dq-agent helps a dataset owner write data-quality checks without writing code.** You point it at your data and describe its business context; it profiles the data and helps you assemble a **contract** — a [Great Expectations](https://greatexpectations.io/) 0.18.2 suite for one Postgres table. You approve the contract once, and from then on an Airflow task runs it **deterministically** on every pipeline run.
 
-A large language model helps you _author_ the contract through a conversation, but it **never touches your data at execution time**. Approved rules run as ordinary, tested Python — not prompts. The LLM is a reasoning layer for scoping, not an execution engine.
+A large language model helps you _author_ the contract through a conversation, but it **never touches your data at execution time**. Approved checks run as Great Expectations expectations, not prompts. The LLM is a reasoning layer for scoping, not an execution engine.
 
-It ships as a **library** (`import dq_agent`) plus a **terminal CLI** for the scoping conversation (`scripts/scoping_cli.py`), with an optional Streamlit chat panel for non-technical owners.
+The repo has two parts:
 
-> **Why not Great Expectations or Soda?** Those are excellent execution frameworks. dq-agent is about the step _before_ execution: turning a dataset owner's knowledge into a tested rule suite through conversation, while keeping the contract format portable and owned by this tool (export adapters to other frameworks can be added later). The deterministic engine here is deliberately small — the differentiator is the curated rule registry and the scoping workflow.
+- **dq-agent** (`src/dq_agent/`): the scoping side — profiler, expectation catalogue, conversational agent and approval gate — driven from a terminal CLI (`scripts/scoping_cli.py`) or an optional Streamlit chat panel.
+- **the data-flow kit** (`dataflow_kit/`): the run side, staged here and copied into the `data-flow` Airflow repo — one utility module, one example validation DAG, and the contracts folder.
+
+> **Why Great Expectations?** At work, pipelines run only in Airflow and the department already uses Great Expectations (0.18.2) there, with results persisted to a validation store and shown on the monitoring dashboard. dq-agent therefore does not run checks itself: its product is a GX-native contract that the shared data-flow task runs. The differentiator is the step _before_ execution — turning a dataset owner's knowledge into a reviewed suite through conversation.
 
 ## Status
 
-This is a phased build; here's what is real today:
+| Capability                                      | State                          |
+| ----------------------------------------------- | ------------------------------ |
+| Deterministic profiler (CSV + Postgres)         | **Done** — tested, usable      |
+| Expectation catalogue (8 GX expectations)       | **Done** — tested              |
+| Scoping agent + human approval gate             | **Working dev demo** (Phase 3) |
+| data-flow kit (utility module + example DAG)    | **Pilot** — to be tried in data-flow |
+| Creative mode — novel rule proposals            | Planned (Phase 4)              |
 
-| Capability                              | State                          |
-| --------------------------------------- | ------------------------------ |
-| Rule registry + execution engine        | **Done** — tested, usable      |
-| Deterministic profiler (CSV + Postgres) | **Done** — tested, usable      |
-| Scoping agent + human approval gate     | **Working dev demo** (Phase 3) |
-| Creative mode — novel rule proposals    | Planned (Phase 4)              |
-
-The deterministic core (engine, profiler, registry, report) is complete and covered by tests. The conversational scoping agent runs locally against any LangChain-supported model and persists approved contracts; it is a working demo rather than a hardened product. See [ACTION_PLAN.md](ACTION_PLAN.md) for the full roadmap.
+The Polars execution engine the project started with is retired; it is preserved on the `feat/bedrock-proxy-adapter` branch. See [ACTION_PLAN.md](ACTION_PLAN.md) for the full roadmap.
 
 ## Contents
 
@@ -35,85 +37,68 @@ The deterministic core (engine, profiler, registry, report) is complete and cove
 
 ### Concepts
 
-- [The deterministic layer](#the-deterministic-layer)
+- [The run side](#the-run-side)
 - [The agentic layer](#the-agentic-layer)
 
 ### For developers
 
 - [Development & testing](#development--testing)
-- [Anatomy of a rule](#anatomy-of-a-rule)
+- [Adding an expectation](#adding-an-expectation)
 - [Design principles](#design-principles)
 
 ## How it works
 
-Everything in the tool belongs to one of two phases that never overlap in time. They share only two things: **connectors** (both start by loading data into a Polars DataFrame) and the **contract YAML** (one phase produces it, the other consumes it).
+The tool has two phases that never overlap in time. The only thing they share is the **contract YAML**: one phase produces it, the other consumes it.
 
 ```text
-SCOPING TIME — once per dataset, human in the loop, LLM allowed
-  load data  →  profile (+ redact)  →  converse & propose rules  →  human approval  →  contract.yaml
+SCOPING TIME — once per table, human in the loop, LLM allowed (dq-agent)
+  load data  →  profile (+ redact)  →  converse & propose expectations  →  human approval  →  <schema>.<table>.yaml
 
-RUN TIME — every pipeline run, deterministic, no LLM anywhere
-  load fresh data  +  approved contract.yaml  →  engine.run()  →  pass/fail per rule
+RUN TIME — every pipeline run, deterministic, no LLM anywhere (data-flow / Airflow)
+  contract YAML  →  validate against allowlist  →  in-memory GX suite + checkpoint  →  pass / fail (fail raises)
 ```
 
 ```mermaid
 flowchart LR
-    subgraph S["Scoping time · human + LLM · once per dataset"]
+    subgraph S["Scoping time · dq-agent · human + LLM"]
         direction LR
-        A[load data] --> B[profile + redact] --> C[converse & propose rules] --> D[human approval]
+        A[load data] --> B[profile + redact] --> C[converse & propose] --> D[human approval]
     end
-    D --> E[(contract.yaml)]
-    subgraph R["Run time · deterministic · every pipeline run"]
+    D --> E[(schema.table.yaml)]
+    subgraph R["Run time · data-flow Airflow task · deterministic"]
         direction LR
-        F[load fresh data] --> G[engine.run] --> H[pass / fail per rule]
+        F[load + validate contract] --> G[GX checkpoint on the table] --> H[pass / fail]
     end
-    E --> G
+    E --> F
 ```
 
-The profiler informs which rules to _propose_; the engine _executes_ what was approved. The engine never profiles, the profiler never executes, and the LLM never touches either — at scoping time it only ever sees a **redacted** profiler report (aggregates and hints, no raw cell values).
+The profiler informs which expectations to _propose_; Great Expectations _executes_ what was approved. The LLM only ever sees a **redacted** profiler report (aggregates and hints, no raw cell values).
 
 ## Quickstart
 
 **Requirements:** Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv sync            # install the core library
+uv sync --extra agents --extra dev
+uv run python scripts/scoping_cli.py
 ```
 
-The repo ships a dirty-by-design dataset (`data/synthetic/orders.csv` — 20 order rows with known issues: null customer ids, a duplicate order id, a negative amount, a malformed email, an unexpected status, a stale date) and an approved contract for it (`contracts/examples/orders.yaml`). Running that contract against the data is three lines:
+The repo ships a dirty-by-design dataset (`data/synthetic/orders.csv` — 20 order rows with known issues: null customer ids, a duplicate order id, a negative amount, a malformed email, an unexpected status, a stale date) and the contract that covers it (`dataflow_kit/dq_contracts/synthetic.orders.yaml`). Loading and validating a contract is what the data-flow task does first:
 
 ```python
-from pathlib import Path
+from dataflow_kit.dq_validation import load_contract
 
-from dq_agent.connectors import load_csv
-from dq_agent.engine import run
-from dq_agent.models import Contract
-from dq_agent.registry import Registry
-
-df = load_csv("data/synthetic/orders.csv")
-contract = Contract.from_yaml(Path("contracts/examples/orders.yaml"))
-results = run(contract, df, Registry(Path("registry/rules")))
+contract = load_contract("dataflow_kit/dq_contracts/synthetic.orders.yaml")  # raises ContractError if invalid
 ```
 
-`results` is a `list[RuleResult]` your pipeline can gate on directly. Every baked-in issue is caught:
+Running it needs Great Expectations 0.18.2 and a Postgres table, so it happens in data-flow — see [The run side](#the-run-side).
 
-```text
-min_row_count   PASS  0.00     # 20 rows, threshold is 10
-null_check      FAIL  0.10     # 2 of 20 customer_id values are null
-unique_check    FAIL  0.05     # order_id 1001 appears twice
-range_check     FAIL  0.05     # one negative amount
-allowed_values  FAIL  0.05     # status 'refunded' not in the approved set
-regex_match     FAIL  0.05     # 'not-an-email'
-freshness       FAIL  0.05     # one order from 2020
-```
-
-For a formatted, human-readable version of this, pass the results to `report.render()` — see the [Report](#report) concept.
 
 ## The scoping agent
 
-Phase 3 wraps the scoping workflow in a single LangGraph agent (`src/dq_agent/agents/scoping.py`). It converses with the dataset owner, profiles the dataset (`profile_dataset` — redacted report only, no raw cell values ever reach the LLM), browses the registry (`list_rules`), and proposes a draft contract (`propose_contract`, validated against the registry). Approval is a LangGraph `interrupt()`: the graph pauses and presents a plain-English summary of the proposed rules (`report.describe_contract`) alongside the full YAML; a human approves / edits / rejects, and only an approved contract is stamped (`approved_at`, `approved_by`), given a schema snapshot, and persisted to `contracts/<dataset>.yaml` — directly executable by the engine.
+Phase 3 wraps the scoping workflow in a single LangGraph agent (`src/dq_agent/agents/scoping.py`). It converses with the dataset owner, profiles the dataset (`profile_dataset` — redacted report only, no raw cell values ever reach the LLM), browses the expectation catalogue (`list_rules`), and proposes a draft contract (`propose_contract`, validated against the same allowlist data-flow uses). Approval is a LangGraph `interrupt()`: the graph pauses and presents a plain-English summary of the proposed checks (`report.describe_contract`) alongside the full YAML; a human approves / edits / rejects, and only an approved contract is stamped (`approval.approved_at`, `approval.approved_by`) and persisted to `contracts/<schema>.<table>.yaml`, ready to commit to data-flow's `dq_contracts/` folder.
 
-The engine enforces the gate at run time: it raises `ContractNotApprovedError` for unapproved contracts and `SchemaDriftError` when the live schema no longer matches the snapshot the contract was scoped against.
+data-flow enforces the gate at run time: its loader rejects a contract without an `approval` block.
 
 ### Running the chat interface
 
@@ -138,7 +123,7 @@ uv run python scripts/scoping_cli.py                       # in-memory session
 uv run python scripts/scoping_cli.py --db scoping.sqlite   # durable, resumable thread
 ```
 
-Then chat: point the agent at `data/synthetic/orders.csv`, describe the business context, and iterate on its proposal. When the agent proposes a contract it pauses at the approval gate and prints the plain-English review; type `approve` to accept (which writes the contract to `contracts/<dataset>.yaml`) or type feedback to have it revise. `--db` keeps the thread on disk so you can stop and resume the same `--thread` later.
+Then chat: point the agent at `data/synthetic/orders.csv`, describe the business context, and iterate on its proposal. When the agent proposes a contract it pauses at the approval gate and prints the plain-English review; type `approve` to accept (which writes the contract to `contracts/<schema>.<table>.yaml`) or type feedback to have it revise. `--db` keeps the thread on disk so you can stop and resume the same `--thread` later.
 
 **Why the CLI compiles the graph with a checkpointer.** The approval gate is a LangGraph `interrupt()`: it pauses the run by persisting it to a checkpointer (keyed by `thread_id`) and resumes by looking it back up. Without a checkpointer the gate can never complete and no contract is produced — so the driver passes one in (`MemorySaver` by default, `SqliteSaver` with `--db`). On `main`, the `langgraph dev` server supplied this implicitly; here the driver owns it.
 
@@ -157,85 +142,65 @@ It shows the conversation with a toggle to reveal the agent's tool calls, and re
 ```text
 dq-agent/
 ├── src/dq_agent/
-│   ├── registry.py     # loads + indexes rule YAML; validates params; resolves rule_id -> callable
-│   ├── engine.py       # runs an approved contract against a DataFrame (deterministic, no LLM)
-│   ├── models.py       # Contract, ContractRule, RuleResult — shared Pydantic models
+│   ├── registry.py     # loads the expectation catalogue; renders plain-English summaries
+│   ├── models.py       # Contract — the GX envelope, validated by the data-flow allowlist
 │   ├── profiler.py     # dataset profiler + redact() — scoping-time facts for the LLM
-│   ├── connectors.py   # load CSV / Parquet / Postgres into a Polars DataFrame
-│   ├── report.py       # render() — list[RuleResult] -> human-readable report
-│   ├── harness.py      # scores a proposed contract vs expected failures (recall / precision)
-│   ├── rules/          # rule functions, one module per DQ category
+│   ├── connectors.py   # load CSV / Parquet / Postgres into a Polars DataFrame for profiling
+│   ├── report.py       # describe_contract() — contract -> plain-English approval card
+│   ├── harness.py      # scores a proposed contract vs the checks it should contain (recall)
 │   └── agents/         # LangGraph scoping agent + human approval gate (Phase 3)
-├── registry/rules/     # rule definitions as YAML — the catalogue the agent draws from
-├── contracts/
-│   ├── examples/       # hand-written example contracts (orders.yaml)
-│   └── <dataset>.yaml  # approved contracts the scoping agent persists land here
+├── registry/rules/     # one YAML per allowed GX expectation — the catalogue the agent draws from
+├── dataflow_kit/       # staged for the data-flow repo
+│   ├── dq_validation.py  # allowlist, load/validate contract, run it as an in-memory GX checkpoint
+│   ├── dags/             # example validation-only DAG
+│   └── dq_contracts/     # one contract per table: <schema>.<table>.yaml
+├── contracts/          # approved contracts the scoping agent persists land here (git-ignored)
 ├── proposals/          # creative-mode (Phase 4) outputs — empty until that phase lands
 ├── data/synthetic/     # dirty-by-design test dataset (orders.csv)
 └── tests/
 ```
 
-**Polars is the internal representation.** Connectors load into a Polars DataFrame before any profiling or rule execution runs — raw DB cursors and pandas frames never reach the engine.
+**Polars is the profiling representation.** Connectors load into a Polars DataFrame before profiling; execution happens in Great Expectations, inside the database.
+
 
 ## Concepts
 
-The toolkit is two layers. The **data-quality layer** defines and runs checks with no LLM involved — it works entirely on its own. The **scoping layer** sits on top and is how an LLM helps a human author a contract for that lower layer to run.
+The toolkit is two layers. The **run side** executes checks with no LLM involved, inside Airflow. The **scoping layer** sits on top and is how an LLM helps a human author a contract for the run side.
 
-### The deterministic layer
+### The run side
 
-These run on every pipeline execution, no LLM anywhere. They build up from the smallest unit to a dataset-specific suite: a **rule** is one check, the **registry** is the collection of all rules, and a **contract** is a chosen subset of them with parameters.
+#### Expectation
 
-#### Rule
+**The smallest unit — one check.** A Great Expectations expectation, used by its GX name and kwargs, e.g. `expect_column_values_to_not_be_null` with `{column: customer_id}`. Eight are allowed today, covering completeness, uniqueness, allowed values, ranges, text format, column type, row count and freshness.
 
-**The smallest unit — one check.** A rule is two artifacts sharing an id: a YAML definition (discoverable metadata and a parameter spec) and a pure Python function (Polars DataFrame in, `RuleResult` out, no side effects). For example, `null_check` fails when a column's null rate exceeds a threshold. Full breakdown in [Anatomy of a rule](#anatomy-of-a-rule).
+#### Allowlist and registry
 
-#### Registry
-
-**The collection of every available rule.** At startup the registry (`registry.py`) loads every rule YAML in `registry/rules/` and indexes it by id (exposing tags for filtering). It is the single source of truth for _what rules exist and how each is configured_: it validates parameters against a rule's spec and resolves a `rule_id` to its callable. The engine routes everything through it, so adding a rule never touches the engine — you drop in a YAML file and a function.
+**Which expectations and kwargs a contract may use.** `ALLOWED_EXPECTATIONS` in `dataflow_kit/dq_validation.py` is the enforcement point: data-flow rejects anything outside it, so a contract cannot smuggle in arbitrary classes, actions or code. `registry/rules/` is the agent's view of the same list — a description, tags, kwarg docs and a plain-English `summary` per expectation. A test keeps the two identical.
 
 #### Contract
 
-**A parameterized subset of registry rules, approved by a human.** A contract selects rules from the registry for one specific dataset and pins their parameters (which column, what threshold), plus optional per-rule severity overrides and the approval metadata that gates execution. It is the **boundary object** — the one artifact the scoping layer produces and the deterministic layer consumes:
+**A GX suite for one table, approved by a human.** It is the boundary object — the one artifact the scoping layer produces and data-flow consumes:
 
 ```yaml
-dataset: orders
-approved_at: 2026-06-12T00:00:00Z # the engine refuses to run without this
-approved_by: jacopo
-columns: # schema snapshot at approval time
-  order_id: Int64
-  customer_id: String
-  # ...
-rules: # each entry = one registry rule + its params
-  - rule_id: null_check
-    params: { column: customer_id, max_null_rate: 0.0 }
-  - rule_id: unique_check
-    params: { column: order_id }
+contract_version: 1
+gx_version: "0.18.2"
+dataset: { schema: synthetic, table: orders }
+approval: { approved_at: 2026-10-08T00:00:00Z, approved_by: jacopo } # data-flow refuses to run without it
+suite:
+  name: synthetic.orders
+  expectations:
+    - expectation_type: expect_column_values_to_not_be_null
+      kwargs: { column: customer_id }
+      meta: { notes: { format: string, content: Every order must belong to a customer } }
+    - expectation_type: expect_column_min_to_be_between # freshness, evaluated at run time
+      kwargs: { column: created_at, min_value: { $PARAMETER: now() - timedelta(days=365) } }
 ```
 
-`columns` is a schema snapshot: at run time the engine compares it against the live schema and raises `SchemaDriftError` if they no longer match — a contract-lifecycle event that routes the owner back to re-scoping, not a per-rule failure.
+Contracts never hold connection strings; the task reads the connection from the environment.
 
-#### Report
+#### The data-flow task
 
-**Results, made legible.** The report module (`report.py`) turns the engine's `list[RuleResult]` into a human-readable summary, joining results with the contract (for parameters) and registry (for rule names) so the output reads without engineering knowledge. `render()` on the Quickstart results produces:
-
-```text
-Dataset: orders  |  Run: 2026-06-15 11:19 UTC
-
-1 of 7 rules passed, 6 failed.
-
-PASSED
-  Minimum Row Count                        min 10 rows            0.0% violation rate
-
-FAILED
-  Null Check                               customer_id            10.0% violation rate
-  Unique Check                             order_id               5.0% violation rate
-  Range Check                              amount                 5.0% violation rate
-  Allowed Values                           status                 5.0% violation rate
-  Regex Match                              email                  5.0% violation rate
-  Freshness Check [warning]                created_at             5.0% violation rate
-```
-
-Each result carries its _effective_ severity (the contract's per-rule override, else the registry default), so a pipeline can gate with nothing but the results — e.g. fail an Airflow task when any `error`-severity rule has `passed == False`. The `[warning]` tag above marks an advisory rule that should not block.
+`dataflow_kit/dags/dq_check_example.py` is a validation-only DAG. Its `@task.virtualenv` task calls `gx_get_context()` (data-flow's own `validation_utils`), `load_contract(contract_path(schema, table))` and `run_contract(...)`, which builds the suite and checkpoint in memory, runs them against the table and raises `DataQualityCheckFailed` on any failure — so Airflow marks the run failed. To validate after an ingestion pipeline instead, chain the same task after its sync (`sync_task >> check(...)`).
 
 ### The agentic layer
 
@@ -243,7 +208,7 @@ These exist only at scoping time, to help a human and an LLM produce a good cont
 
 #### Profiler
 
-**The agent's window into the dataset.** The profiler (`profiler.py`) is the main tool the agent uses to reason about data it cannot see directly. `profile()` produces a structured report — per-column stats, table stats, and semantic hints — that tells the agent _which rules are worth proposing_: a column hinted `email` with a few malformed values suggests a `regex_match`; a high null rate suggests a `null_check`. Per-column stats include null rate, uniqueness, min/max, and distribution; semantic hints cover `email`, `phone`, `id`, and `date`. It is pure, deterministic code; the LLM consults its output, it does not run it.
+**The agent's window into the dataset.** The profiler (`profiler.py`) is the main tool the agent uses to reason about data it cannot see directly. `profile()` produces a structured report — per-column stats, table stats, and semantic hints — that tells the agent _which expectations are worth proposing_: a column hinted `email` suggests `expect_column_values_to_match_regex`; a column with no nulls that the owner says is mandatory suggests `expect_column_values_to_not_be_null`. Per-column stats include null rate, uniqueness, min/max, and distribution; semantic hints cover `email`, `phone`, `id`, and `date`. It is pure, deterministic code; the LLM consults its output, it does not run it.
 
 #### Redaction
 
@@ -266,7 +231,7 @@ Redaction is enforced in the agent's tooling: the `profile_dataset` tool always 
 
 #### Harness
 
-**Regression-testing the scoping agent.** The harness (`harness.py`) scores a proposed contract against a hand-written set of expected failures, reporting **recall** (did it catch every known issue?) and **precision** (did it flag anything spurious?). It exists so that a change to the system prompt, model, or registry that silently reduces coverage of known dataset issues is caught by an assertion like `score.recall == 1.0`.
+**Regression-testing the scoping agent.** The harness (`harness.py`) compares a proposed contract with the hand-written list of `(expectation_type, column)` checks that cover each known issue, reporting **recall** (did it include every one?) and any **extra** checks. It exists so that a change to the system prompt, model, or registry that silently reduces coverage of known dataset issues is caught by an assertion like `score.recall == 1.0`.
 
 ## For developers
 
@@ -276,7 +241,7 @@ Install the optional dependency groups you need:
 
 | Command                    | Adds                                                    |
 | -------------------------- | ------------------------------------------------------- |
-| `uv sync`                  | core: Polars, Pydantic, PyYAML                          |
+| `uv sync`                  | core: Polars, Pydantic, PyYAML (also all the data-flow kit needs to load contracts) |
 | `uv sync --extra dev`      | pytest, pytest-cov                                      |
 | `uv sync --extra postgres` | ConnectorX (Postgres connector)                         |
 | `uv sync --extra agents`   | LangGraph + LangChain + SQLite checkpointer (the scoping agent + CLI driver) |
@@ -285,7 +250,7 @@ Run the suite:
 
 ```bash
 uv run pytest                                          # all tests
-uv run pytest tests/test_engine.py::test_run_passes_on_clean_column   # a single test
+uv run pytest tests/test_registry.py::test_registry_matches_the_data_flow_allowlist   # a single test
 uv run pytest --cov=src/dq_agent                       # with coverage
 ```
 
@@ -305,54 +270,29 @@ docker rm -f dq-test-pg
 
 **CI** runs the suite on push to `main` and on every pull request, across Python 3.11–3.13 (`.github/workflows/tests.yml`).
 
-### Anatomy of a rule
+### Adding an expectation
 
-Every rule is two artifacts that share an id: a YAML definition (what the agent and humans see) and a pure function (what the engine runs).
-
-The YAML in `registry/rules/` carries everything needed to discover, validate, and route the rule — tags the scoping agent queries, parameter specs that contracts are validated against, a default severity, and a pointer to the implementation:
+1. Add an entry to `ALLOWED_EXPECTATIONS` in `dataflow_kit/dq_validation.py`: its required and optional kwargs, each with a small type check. Only kwargs GX 0.18.2 actually accepts for that expectation.
+2. Add `registry/rules/<expectation_type>.yaml` with the same kwargs, a description the agent can reason from, tags, and a `summary` template:
 
 ```yaml
-# registry/rules/null_check.yaml
-id: null_check
-name: Null Check
-description: Fails if the null rate in a column exceeds max_null_rate.
+id: expect_column_values_to_not_be_null
+name: Not null
+description: Fails if the column has null values. Set mostly below 1.0 to tolerate a share of nulls.
 tags: [completeness]
-severity: error
-parameters:
+kwargs:
   column: { type: str, required: true }
-  max_null_rate: { type: float, default: 0.0 }
-execution:
-  module: dq_agent.rules.completeness
-  function: null_check
+  mostly: { type: float, description: fraction of rows that must be non-null (default 1.0) }
+summary: "`{column}` must never be empty"
 ```
 
-The function in `src/dq_agent/rules/` is the implementation: Polars DataFrame in, `RuleResult` out — no side effects, no I/O, no LLM:
+3. Run the tests: `test_registry_matches_the_data_flow_allowlist` fails until the two agree. Then copy the updated `dq_validation.py` into data-flow.
 
-```python
-# src/dq_agent/rules/completeness.py
-def null_check(df: pl.DataFrame, *, column: str, max_null_rate: float = 0.0) -> RuleResult:
-    violation_rate = df[column].null_count() / len(df)
-    return RuleResult(
-        rule_id="null_check",
-        passed=violation_rate <= max_null_rate,
-        violation_rate=violation_rate,
-    )
-```
-
-A contract then activates a rule for one dataset by id, with parameters chosen during scoping:
-
-```yaml
-- rule_id: null_check
-  params: { column: customer_id, max_null_rate: 0.0 }
-```
-
-For each contract entry the engine validates params against the spec (presence, unknown names, and type), resolves the callable, runs it, and folds any failure into that rule's result (`error` set, `violation_rate` null) — one broken rule never blocks the rest. On an empty dataset a column rule cannot be evaluated (zero rows would divide by zero / pass vacuously) and reports an un-evaluated result, while table-level rules like `min_row_count` still run — an empty table is exactly their concern.
-
-Adding a rule never touches the engine: one YAML file, one function, tests. Authoring standards live in `.claude/roles/rule-author.md`.
+Authoring standards live in `.claude/roles/rule-author.md`.
 
 ### Design principles
 
-- **Registry first.** The quality of the rule registry determines the quality of every contract the agent produces. Invest there.
-- **Deterministic by default.** The LLM is a reasoning layer, not an execution layer. Approved rules run as code, not prompts.
+- **Registry first.** The quality of the expectation catalogue determines the quality of every contract the agent produces. Invest there.
+- **Deterministic by default.** The LLM is a reasoning layer, not an execution layer. Approved checks run as Great Expectations expectations, not prompts.
 - **Framework agnostic at the model layer.** LLM provider is a config value. Swap between Anthropic, OpenAI, or a local model without code changes.
-- **Own the contract format.** Contracts are portable YAML. Export adapters to other DQ tools (Great Expectations, Soda) can be added later without changing the core.
+- **GX-native, allowlisted contracts.** Contracts use Great Expectations 0.18.2 names and kwargs directly, inside a small envelope; a deterministic allowlist decides what may run. No translation layer, no generated code.

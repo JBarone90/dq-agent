@@ -1,83 +1,53 @@
 ---
 role: rule-author
-applies_when: Writing or editing any file under registry/rules/ or src/dq_agent/rules/
-description: Coding criteria for authoring data quality rule functions in this project
+applies_when: Writing or editing any file under registry/rules/, or the ALLOWED_EXPECTATIONS allowlist in dataflow_kit/dq_validation.py
+description: How to add or change an expectation the scoping agent may propose and data-flow may run
 ---
 
 # Rule Author Role
 
-## What a rule is
+## What a rule is now
 
-A rule is a **pure function** that takes a Polars DataFrame and keyword parameters, checks one
-data quality condition, and returns a `RuleResult`. Nothing else.
+A rule is a **Great Expectations 0.18.2 expectation** that contracts may use, under its GX name (e.g. `expect_column_values_to_not_be_null`). dq-agent no longer executes anything: data-flow runs the contract with GX inside an Airflow task. A rule therefore lives in two places that must agree exactly:
 
-## Function signature
+1. **The allowlist** — `ALLOWED_EXPECTATIONS` in `dataflow_kit/dq_validation.py`. The enforcement point: data-flow rejects any expectation or kwarg not listed. Each kwarg maps to a small check function (`_string`, `_fraction`, `_non_empty_list`, ...).
+2. **The catalogue** — `registry/rules/<expectation_type>.yaml`. What the agent reads to decide what to propose, and how the approval gate phrases it.
+
+`test_registry_matches_the_data_flow_allowlist` fails until both list the same expectations, kwargs and required kwargs.
+
+## Allowlist entry
 
 ```python
-def rule_name(df: pl.DataFrame, *, column: str, **kwargs) -> RuleResult:
+"expect_column_values_to_be_in_set": {
+    "required": {"column": _string, "value_set": _non_empty_list},
+    "optional": {"mostly": _fraction},
+},
 ```
 
-- All parameters after `df` are keyword-only
-- Parameter names must match the `parameters` keys in the rule's YAML definition exactly
-- Table-level rules (e.g. `min_row_count`) take no `column` parameter — the signature
-  above shows the common column-level shape, not a requirement
-- Return type is always `RuleResult` — never a plain dict or bool
+- Only kwargs GX 0.18.2 accepts for that expectation (check `get_expectation_impl(name).success_keys` and `domain_keys`). Never allow `row_condition`, `condition_parser`, `result_format`, `catch_exceptions`, `auto` or `profiler_config`.
+- Allow `mostly` only where it means something (column map expectations); not on aggregate or schema checks.
+- If an expectation needs at least one of several optional kwargs (a range), add it to `_ONE_OF`.
+- Evaluation parameters (`{"$PARAMETER": ...}`) are allowed only through a dedicated check with an exact pattern, never as free expressions.
+- The module must stay stdlib + PyYAML + GX and must never import `dq_agent`: it is copied into data-flow.
 
-## Invariants
-
-- **No side effects.** Never write to disk, log, mutate the DataFrame, or call external services.
-- **No LLM calls.** Rules are deterministic code only.
-- **Polars expressions only.** Never iterate over rows. No pandas, no numpy loops.
-- **Never raise.** Catch internal errors and surface them through `RuleResult.error` if needed.
-- **Non-empty, valid input is the engine's problem.** The engine rejects empty datasets
-  before any rule runs (vacuous pass is a silent failure mode) and validates column names.
-  Rules can assume at least one row and that the column exists — do not re-check either.
-
-## RuleResult fields to populate
-
-- `rule_id`: copy from the YAML `id`, hardcoded per function
-- `passed`: bool — the single verdict
-- `violation_rate`: fraction of rows that violated the rule (0.0–1.0) — a rule that
-  evaluates the data always populates this with a measured value, where `0.0` means
-  measured clean. `None` means the rule was never evaluated and is the exact complement of
-  `error`: set both together (`violation_rate=None` whenever `error` is set, a real rate
-  whenever it is not). Do not return `0.0` alongside an error — that reads as "clean" when
-  nothing was measured. Table-level rules define their own 0.0–1.0 semantics and document
-  them in the YAML description (e.g. `min_row_count` reports the shortfall as a fraction of
-  the threshold)
-- `error`: populate only when the rule cannot run due to misconfiguration; set
-  `passed=False` and leave `violation_rate=None`
-
-## YAML definition (one file per rule)
+## Catalogue YAML
 
 ```yaml
-id: null_check
-name: Null Check
-description: Fails if null rate in a column exceeds the configured threshold.
-tags: [completeness, any_type]
-severity: error          # error | warning
-parameters:
+id: expect_column_values_to_not_be_null
+name: Not null
+description: Fails if the column has null values. Set mostly below 1.0 to tolerate a share of nulls.
+tags: [completeness]
+kwargs:
   column: {type: str, required: true}
-  max_null_rate: {type: float, default: 0.0}
-execution:
-  module: dq_agent.rules.completeness
-  function: null_check
+  mostly: {type: float, description: fraction of rows that must be non-null (default 1.0)}
+summary: "`{column}` must never be empty"
 ```
+
+- `description` is read by the LLM: say when to use the expectation and any backend caveat (e.g. regex is POSIX on Postgres).
+- `summary` is shown to a non-engineer at the approval gate. Placeholders are kwarg names; a missing kwarg renders as "no limit", a list as comma-separated values, and `mostly < 1` adds "(for at least N% of rows)" automatically. Do not expose raw regexes or code in the summary.
 
 ## Testing
 
-**Prefer conftest fixtures for standard cases.** The shared `clean_df` and `dirty_df` fixtures
-in `conftest.py` represent the synthetic dataset and should be the default input for rule tests.
-Use them for the happy path (passes on clean data, fails on dirty data).
-
-**Use inline DataFrames only for rule-specific edge cases** — when the data is small (2–5 rows),
-specific to one rule's boundary condition, and would be misleading as a shared fixture
-(e.g. a DataFrame with all nulls used only to test `null_check` at 100% null rate).
-
-Each rule must have tests that:
-1. Assert `passed=True` on clean data (via fixture)
-2. Assert `passed=False` on dirty data (via fixture or inline if fixture doesn't cover the case)
-3. Check `violation_rate` is the correct measured value
-4. Cover at least one boundary/edge case inline
-
-Tests live in `tests/rules/` mirroring the source structure.
+- The parity test covers the allowlist/catalogue match.
+- Add a `describe_contract` assertion in `tests/test_report.py` for the new phrasing.
+- Before promoting a new expectation, run it once against a real table with GX 0.18.2 (the allowlist cannot prove GX accepts a kwarg combination on Postgres).
