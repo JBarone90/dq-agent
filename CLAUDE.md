@@ -23,15 +23,16 @@ uv run python scripts/scoping_cli.py --db scoping.sqlite   # ...with a durable, 
 The project separates the LLM reasoning layer from all data work. The LLM is intentionally limited to two roles: **scoping conversations** and **creative mode** (proposing novel rules). Everything else is deterministic code. Execution happens outside this tool: the department runs pipelines only in Airflow (`data-flow` repo) and validates with Great Expectations 0.18.2, so dq-agent's product is a GX-native contract that a shared data-flow task runs.
 
 ```text
-registry/rules/      ← one YAML per allowed GX expectation (id = expectation_type, tags, kwargs,
-                       plain-English summary template) — the agent's catalogue
+registry/
+  expectations.yaml  ← our notes per allowed expectation: tags, plain-English summary, usage caveats.
+                       The rest of the agent's catalogue (descriptions, kwargs) is read from GX
 dataflow_kit/        ← staged for the data-flow repo, copied over at work; must not import dq_agent
-  dq_validation.py   ← ALLOWED_EXPECTATIONS allowlist, load/validate a contract, run it as an
+  dq_validation.py   ← ALLOWED_EXPECTATIONS (names) + policy, load/validate a contract, run it as an
                        in-memory GX suite + checkpoint, raise on failure
   dags/              ← example validation-only Airflow DAG
   dq_contracts/      ← one contract per table: <schema>.<table>.yaml
 src/dq_agent/
-  registry.py        ← loads the expectation catalogue; renders summaries for the approval gate
+  registry.py        ← builds the agent's catalogue from GX metadata + registry/expectations.yaml
   models.py          ← Contract: the GX envelope; problems() delegates to the data-flow allowlist
   profiler.py        ← produces a structured JSON report (col stats, table stats, semantic hints);
                        redact() strips raw cell values before any report reaches an LLM
@@ -46,10 +47,10 @@ data/synthetic/      ← dirty-by-design test dataset (committed); all other dat
 ### Key design invariants
 
 - **Polars is the profiling representation.** Connectors load into a Polars DataFrame before profiling. Execution is Great Expectations, inside the database, in data-flow.
-- **Contracts are GX 0.18.2-native and allowlisted.** Expectation names and kwargs are used directly — no translation layer, no generated code, no `eval`. `ALLOWED_EXPECTATIONS` in `dataflow_kit/dq_validation.py` is the single definition of what is valid; `Contract.problems()` delegates to it and `registry/rules/` must mirror it (enforced by `test_registry_matches_the_data_flow_allowlist`). Do not upgrade the GX version silently.
+- **Contracts are GX 0.18.2-native and allowlisted.** Expectation names and kwargs are used directly — no translation layer, no generated code, no `eval`. `dataflow_kit/dq_validation.py` is the single definition of what is valid: `ALLOWED_EXPECTATIONS` lists the permitted names, the permitted kwargs are GX's own keys minus `FORBIDDEN_KWARGS`, values are checked by GX's `validate_configuration` plus a few policy rules. `Contract.problems()` and the agent's catalogue (`registry.py`) both derive from it, so never restate kwargs or types elsewhere. Do not upgrade the GX version silently.
 - **Contracts gate execution.** No check runs without an approved contract: data-flow's loader rejects a contract without an `approval` block. Contracts never contain connection strings.
 - **Keep the data-flow footprint minimal.** The kit is one utility module, one example DAG and the contracts folder. Do not add scripts or infrastructure there without asking.
-- **Proposals are never executed.** `proposals/` contains hypotheses. Promote to `registry/rules/` only after developer review.
+- **Proposals are never executed.** `proposals/` contains hypotheses. Promote to the allowlist only after developer review.
 - **LLM provider is a config value.** Agent code binds to LangChain's provider-agnostic interface. Swapping between Anthropic, OpenAI, or a local model requires no code changes.
 
 ## Roles
@@ -59,7 +60,7 @@ before starting work in the corresponding area:
 
 | When you are...                                      | Load this role file              |
 | ---------------------------------------------------- | -------------------------------- |
-| Writing or editing files in `registry/rules/` or the allowlist in `dataflow_kit/dq_validation.py` | `.claude/roles/rule-author.md` |
+| Editing `registry/expectations.yaml` or the allowlist/policy in `dataflow_kit/dq_validation.py` | `.claude/roles/rule-author.md` |
 | Editing the scoping agent's approval gate / interrupt payloads, or the CLI/Streamlit driver that consumes them | `.claude/roles/hitl-driver.md` |
 
 ---

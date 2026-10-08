@@ -142,14 +142,14 @@ It shows the conversation with a toggle to reveal the agent's tool calls, and re
 ```text
 dq-agent/
 ├── src/dq_agent/
-│   ├── registry.py     # loads the expectation catalogue; renders plain-English summaries
+│   ├── registry.py     # builds the agent's catalogue from GX metadata + our notes
 │   ├── models.py       # Contract — the GX envelope, validated by the data-flow allowlist
 │   ├── profiler.py     # dataset profiler + redact() — scoping-time facts for the LLM
 │   ├── connectors.py   # load CSV / Parquet / Postgres into a Polars DataFrame for profiling
 │   ├── report.py       # describe_contract() — contract -> plain-English approval card
 │   ├── harness.py      # scores a proposed contract vs the checks it should contain (recall)
 │   └── agents/         # LangGraph scoping agent + human approval gate (Phase 3)
-├── registry/rules/     # one YAML per allowed GX expectation — the catalogue the agent draws from
+├── registry/expectations.yaml  # our notes per allowed expectation (tags, summary, caveats)
 ├── dataflow_kit/       # staged for the data-flow repo
 │   ├── dq_validation.py  # allowlist, load/validate contract, run it as an in-memory GX checkpoint
 │   ├── dags/             # example validation-only DAG
@@ -175,7 +175,9 @@ The toolkit is two layers. The **run side** executes checks with no LLM involved
 
 #### Allowlist and registry
 
-**Which expectations and kwargs a contract may use.** `ALLOWED_EXPECTATIONS` in `dataflow_kit/dq_validation.py` is the enforcement point: data-flow rejects anything outside it, so a contract cannot smuggle in arbitrary classes, actions or code. `registry/rules/` is the agent's view of the same list — a description, tags, kwarg docs and a plain-English `summary` per expectation. A test keeps the two identical.
+**Which expectations and kwargs a contract may use.** `dataflow_kit/dq_validation.py` is the enforcement point, and it leans on GX itself: `ALLOWED_EXPECTATIONS` lists the permitted expectation names; the kwargs each one may take are GX's own domain and success keys minus a few forbidden ones (`row_condition`, `result_format`, …); GX's `validate_configuration` checks the values; and a handful of policy rules cover what GX lets through (unknown kwargs, an empty `value_set`, a missing `regex`, a range with no bound, any `$PARAMETER` other than the freshness form). A contract therefore cannot smuggle in arbitrary classes, actions or code.
+
+The agent's catalogue is built from the same source at startup: for each allowed name, `registry.py` reads the expectation's docstring (description and per-kwarg documentation), its kwargs and defaults from GX. `registry/expectations.yaml` adds only what GX cannot know: tags, a plain-English `summary` for the approval gate, and usage notes such as "regex is POSIX on Postgres".
 
 #### Contract
 
@@ -244,13 +246,13 @@ Install the optional dependency groups you need:
 | `uv sync`                  | core: Polars, Pydantic, PyYAML (also all the data-flow kit needs to load contracts) |
 | `uv sync --extra dev`      | pytest, pytest-cov                                      |
 | `uv sync --extra postgres` | ConnectorX (Postgres connector)                         |
-| `uv sync --extra agents`   | LangGraph + LangChain + SQLite checkpointer (the scoping agent + CLI driver) |
+| `uv sync --extra agents`   | LangGraph + LangChain + SQLite checkpointer + Great Expectations 0.18.2 (the scoping agent, CLI driver and contract validation) |
 
 Run the suite:
 
 ```bash
 uv run pytest                                          # all tests
-uv run pytest tests/test_registry.py::test_registry_matches_the_data_flow_allowlist   # a single test
+uv run pytest tests/test_registry.py::test_kwargs_and_docs_come_from_gx   # a single test
 uv run pytest --cov=src/dq_agent                       # with coverage
 ```
 
@@ -272,21 +274,17 @@ docker rm -f dq-test-pg
 
 ### Adding an expectation
 
-1. Add an entry to `ALLOWED_EXPECTATIONS` in `dataflow_kit/dq_validation.py`: its required and optional kwargs, each with a small type check. Only kwargs GX 0.18.2 actually accepts for that expectation.
-2. Add `registry/rules/<expectation_type>.yaml` with the same kwargs, a description the agent can reason from, tags, and a `summary` template:
+1. Add its name to `ALLOWED_EXPECTATIONS` in `dataflow_kit/dq_validation.py` (with any kwarg our policy requires beyond GX, e.g. `regex`). Its kwargs, types and documentation come from GX automatically.
+2. Optionally add an entry to `registry/expectations.yaml` — without one the agent still sees GX's description, and the approval gate shows the raw name and kwargs:
 
 ```yaml
-id: expect_column_values_to_not_be_null
-name: Not null
-description: Fails if the column has null values. Set mostly below 1.0 to tolerate a share of nulls.
-tags: [completeness]
-kwargs:
-  column: { type: str, required: true }
-  mostly: { type: float, description: fraction of rows that must be non-null (default 1.0) }
-summary: "`{column}` must never be empty"
+expect_column_values_to_not_be_null:
+  tags: [completeness]
+  summary: "`{column}` must never be empty"
+  notes: Use for columns the owner says are mandatory.
 ```
 
-3. Run the tests: `test_registry_matches_the_data_flow_allowlist` fails until the two agree. Then copy the updated `dq_validation.py` into data-flow.
+3. Run it once against a real table, then copy the updated `dq_validation.py` into data-flow.
 
 Authoring standards live in `.claude/roles/rule-author.md`.
 
