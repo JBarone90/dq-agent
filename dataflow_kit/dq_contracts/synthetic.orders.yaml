@@ -1,0 +1,30 @@
+# Format reference only: the synthetic orders dataset from dq-agent, expressed as a contract.
+# The pilot contract for a real table is produced by the dq-agent scoping agent at work
+# and saved next to this file as <schema>.<table>.yaml.
+contract_version: 1
+gx_version: "0.18.2"
+dataset:
+  schema: synthetic
+  table: orders
+approval:
+  approved_at: 2026-10-08T00:00:00Z
+  approved_by: jacopo
+suite:
+  name: synthetic.orders
+  expectations:
+    - expectation_type: expect_table_row_count_to_be_between
+      kwargs: {min_value: 10}
+    - expectation_type: expect_column_values_to_not_be_null
+      kwargs: {column: customer_id}
+      meta:
+        notes: {format: string, content: Every order must belong to a customer}
+    - expectation_type: expect_column_values_to_be_unique
+      kwargs: {column: order_id}
+    - expectation_type: expect_column_values_to_be_between
+      kwargs: {column: amount, min_value: 0}
+    - expectation_type: expect_column_values_to_be_in_set
+      kwargs: {column: status, value_set: [shipped, delivered, pending, cancelled]}
+    - expectation_type: expect_column_values_to_match_regex
+      kwargs: {column: email, regex: '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'}
+    - expectation_type: expect_column_min_to_be_between
+      kwargs: {column: created_at, min_value: {$PARAMETER: now() - timedelta(days=365)}}
