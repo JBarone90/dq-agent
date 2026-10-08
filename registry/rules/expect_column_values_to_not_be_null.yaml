@@ -1,0 +1,8 @@
+id: expect_column_values_to_not_be_null
+name: Not null
+description: Fails if the column has null values. Set mostly below 1.0 to tolerate a share of nulls (mostly 0.95 allows up to 5%).
+tags: [completeness]
+kwargs:
+  column: {type: str, required: true}
+  mostly: {type: float, description: fraction of rows that must be non-null (default 1.0)}
+summary: "`{column}` must never be empty"

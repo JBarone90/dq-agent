@@ -16,9 +16,9 @@ from langgraph.types import Command
 import dq_agent.connectors as connectors
 from dq_agent.agents import bedrock_chat
 from dq_agent.agents.bedrock_chat import DeptBedrockChat
-from dq_agent.agents.scoping import ProposedRule, _make_tools, build_graph
+from dq_agent.agents.scoping import ProposedExpectation, _make_tools, build_graph
 from dq_agent.connectors import ProfilingLoad
-from dq_agent.engine import run
+from dataflow_kit.dq_validation import load_contract
 from dq_agent.models import Contract
 
 
@@ -64,8 +64,8 @@ def test_profile_dataset_missing_file_errors(tools):
 
 def test_list_rules_filters_by_tag(tools):
     catalogue = tools["list_rules"].invoke({"tags": ["completeness"]})
-    assert "null_check" in catalogue
-    assert "unique_check" not in catalogue
+    assert "expect_column_values_to_not_be_null" in catalogue
+    assert "expect_column_values_to_be_unique" not in catalogue
 
 
 def test_list_rules_unfiltered_lists_registry(tools, registry):
@@ -77,7 +77,7 @@ def test_list_rules_unfiltered_lists_registry(tools, registry):
 def test_propose_contract_requires_profile(tools):
     command = tools["propose_contract"].invoke(_tool_call(
         "propose_contract",
-        {"rules": [{"rule_id": "null_check", "params": {"column": "order_id"}}],
+        {"expectations": [{"expectation_type": "expect_column_values_to_not_be_null", "kwargs": {"column": "order_id"}}], "table": "synthetic.orders",
          "state": {}},
     ))
     assert "profile the dataset first" in command.update["messages"][0].content
@@ -89,29 +89,54 @@ def test_propose_contract_rejects_unknown_rule(tools, synthetic_data_path):
     )
     command = tools["propose_contract"].invoke(_tool_call(
         "propose_contract",
-        {"rules": [{"rule_id": "does_not_exist", "params": {}}],
-         "state": {"profile": profiled.update["profile"]}},
+        {"expectations": [{"expectation_type": "does_not_exist", "kwargs": {}}],
+         "table": "synthetic.orders", "state": {"profile": profiled.update["profile"]}},
     ))
-    assert "unknown rule 'does_not_exist'" in command.update["messages"][0].content
+    assert "'does_not_exist' is not an allowed" in command.update["messages"][0].content
     assert "draft" not in command.update
 
 
-def test_propose_contract_records_unapproved_draft(tools, synthetic_data_path, orders_df):
+def test_propose_contract_records_unapproved_draft(tools, synthetic_data_path):
     profiled = tools["profile_dataset"].invoke(
         _tool_call("profile_dataset", {"path": str(synthetic_data_path / "orders.csv")})
     )
     command = tools["propose_contract"].invoke(_tool_call(
         "propose_contract",
-        {"rules": [{"rule_id": "null_check", "params": {"column": "order_id"},
-                    "severity": "warning"}],
-         "state": {"profile": profiled.update["profile"]}},
+        {"expectations": [{
+            "expectation_type": "expect_column_values_to_not_be_null",
+            "kwargs": {"column": "order_id"},
+            "meta": {"notes": {"format": "string", "content": "every order has an id"}},
+        }], "table": "synthetic.orders", "state": {"profile": profiled.update["profile"]}},
     ))
     draft = Contract.model_validate(command.update["draft"])
-    assert draft.approved_at is None
-    assert draft.dataset == "orders"
-    assert draft.rules[0].severity == "warning"
-    # schema snapshot comes from the profile, so the engine's drift check will hold
-    assert draft.columns == {name: str(dtype) for name, dtype in orders_df.schema.items()}
+    assert draft.approval is None
+    assert draft.dataset.name == "synthetic.orders"
+    assert draft.suite.expectations[0].meta.notes.content == "every order has an id"
+
+
+def test_propose_contract_from_file_needs_target_table(tools, synthetic_data_path):
+    profiled = tools["profile_dataset"].invoke(
+        _tool_call("profile_dataset", {"path": str(synthetic_data_path / "orders.csv")})
+    )
+    command = tools["propose_contract"].invoke(_tool_call(
+        "propose_contract",
+        {"expectations": [{"expectation_type": "expect_column_values_to_not_be_null", "kwargs": {"column": "order_id"}}], "state": {"profile": profiled.update["profile"]}},
+    ))
+    assert "which Postgres table" in command.update["messages"][0].content
+    assert "draft" not in command.update
+
+
+def test_propose_contract_defaults_target_to_profiled_table(tools, orders_df, monkeypatch):
+    _mock_pg(monkeypatch, orders_df, sampled=False, estimated_rows=20)
+    profiled = tools["profile_table"].invoke(
+        _tool_call("profile_table", {"table": "public.orders"})
+    )
+    command = tools["propose_contract"].invoke(_tool_call(
+        "propose_contract",
+        {"expectations": [{"expectation_type": "expect_column_values_to_not_be_null", "kwargs": {"column": "order_id"}}],
+         "state": {"profile": profiled.update["profile"], "source_table": "public.orders"}},
+    ))
+    assert Contract.model_validate(command.update["draft"]).dataset.name == "public.orders"
 
 
 # --- postgres profiling + gated bounds confirmation ----------------------
@@ -182,14 +207,13 @@ def test_propose_contract_confirms_bounds_when_sampled(tools, orders_df, monkeyp
     )
     command = tools["propose_contract"].invoke(_tool_call(
         "propose_contract",
-        {"rules": [{"rule_id": "range_check",
-                    "params": {"column": "amount", "min_val": 0, "max_val": 5000}}],
+        {"expectations": [{"expectation_type": "expect_column_values_to_be_between", "kwargs": {"column": "amount", "min_value": 0, "max_value": 5000}}],
          "state": {"profile": profiled.update["profile"], "source_table": "public.orders"}},
     ))
     assert spy == ["amount"]  # confirmed exactly the referenced column, once
     content = command.update["messages"][0].content
     assert "existing rows would violate" in content
-    assert "99999" in content  # the real max, above the proposed max_val
+    assert "99999" in content  # the real max, above the proposed max_value
 
 
 def test_propose_contract_skips_bounds_when_not_sampled(tools, orders_df, monkeypatch):
@@ -201,8 +225,7 @@ def test_propose_contract_skips_bounds_when_not_sampled(tools, orders_df, monkey
     )
     command = tools["propose_contract"].invoke(_tool_call(
         "propose_contract",
-        {"rules": [{"rule_id": "range_check",
-                    "params": {"column": "amount", "min_val": 0, "max_val": 5000}}],
+        {"expectations": [{"expectation_type": "expect_column_values_to_be_between", "kwargs": {"column": "amount", "min_value": 0, "max_value": 5000}}],
          "state": {"profile": profiled.update["profile"], "source_table": "public.orders"}},
     ))
     assert spy == []  # full-load profile: no confirmation query
@@ -218,39 +241,42 @@ def test_propose_contract_skips_bounds_without_range_check(tools, orders_df, mon
     )
     tools["propose_contract"].invoke(_tool_call(
         "propose_contract",
-        {"rules": [{"rule_id": "null_check", "params": {"column": "order_id"}}],
+        {"expectations": [{"expectation_type": "expect_column_values_to_not_be_null", "kwargs": {"column": "order_id"}}], "table": "synthetic.orders",
          "state": {"profile": profiled.update["profile"], "source_table": "public.orders"}},
     ))
-    assert spy == []  # no range_check -> nothing to confirm
+    assert spy == []  # no range expectation -> nothing to confirm
 
 
-# --- proposed rule param coercion ----------------------------------------
+# --- proposed expectation kwargs coercion --------------------------------
+
+NOT_NULL = "expect_column_values_to_not_be_null"
 
 
-def test_proposed_rule_coerces_json_string_params():
-    """Some models serialize params as a JSON string; the validator parses it so the
+def test_proposed_expectation_coerces_json_string_kwargs():
+    """Some models serialize kwargs as a JSON string; the validator parses it so the
     first tool call validates instead of needing a retry."""
-    rule = ProposedRule(rule_id="null_check", params='{"column": "email"}')
-    assert rule.params == {"column": "email"}
+    e = ProposedExpectation(expectation_type=NOT_NULL, kwargs='{"column": "email"}')
+    assert e.kwargs == {"column": "email"}
 
 
-def test_proposed_rule_keeps_dict_params_untouched():
-    rule = ProposedRule(rule_id="null_check", params={"column": "email"})
-    assert rule.params == {"column": "email"}
+def test_proposed_expectation_keeps_dict_kwargs_untouched():
+    e = ProposedExpectation(expectation_type=NOT_NULL, kwargs={"column": "email"})
+    assert e.kwargs == {"column": "email"}
 
 
-def test_propose_contract_accepts_string_params(tools, synthetic_data_path):
-    """End to end through the tool: string params no longer fail validation."""
+def test_propose_contract_accepts_string_kwargs(tools, synthetic_data_path):
+    """End to end through the tool: string kwargs no longer fail validation."""
     profiled = tools["profile_dataset"].invoke(
         _tool_call("profile_dataset", {"path": str(synthetic_data_path / "orders.csv")})
     )
     command = tools["propose_contract"].invoke(_tool_call(
         "propose_contract",
-        {"rules": [{"rule_id": "unique_check", "params": '{"column": "order_id"}'}],
-         "state": {"profile": profiled.update["profile"]}},
+        {"expectations": [{"expectation_type": "expect_column_values_to_be_unique",
+                           "kwargs": '{"column": "order_id"}'}],
+         "table": "synthetic.orders", "state": {"profile": profiled.update["profile"]}},
     ))
     draft = Contract.model_validate(command.update["draft"])
-    assert draft.rules[0].params == {"column": "order_id"}
+    assert draft.suite.expectations[0].kwargs == {"column": "order_id"}
 
 
 # --- graph: approval gate ------------------------------------------------
@@ -262,7 +288,7 @@ def _scoping_graph(tmp_path, registry, synthetic_data_path, closing_message):
         AIMessage("", tool_calls=[_tool_call("profile_dataset", {"path": csv}, "c1")]),
         AIMessage("", tool_calls=[_tool_call(
             "propose_contract",
-            {"rules": [{"rule_id": "null_check", "params": {"column": "order_id"}}]},
+            {"expectations": [{"expectation_type": "expect_column_values_to_not_be_null", "kwargs": {"column": "order_id"}}], "table": "synthetic.orders"},
             "c2",
         )]),
         AIMessage("", tool_calls=[_tool_call("request_approval", {}, "c3")]),
@@ -285,14 +311,14 @@ def test_graph_pauses_on_approval_interrupt(tmp_path, registry, synthetic_data_p
     request = intr.value
     action = request["action_requests"][0]
     assert action["name"] == "approve_contract"
-    assert "null_check" in action["description"]
+    assert "`order_id` must never be empty" in action["description"]
     assert "```yaml" in action["description"]  # YAML fenced so markdown keeps indentation
     assert request["review_configs"][0]["allowed_decisions"] == ["approve", "edit", "reject"]
     assert not list(tmp_path.glob("*.yaml")), "nothing persists before approval"
 
 
-def test_accept_persists_approved_contract_the_engine_runs(
-    tmp_path, registry, synthetic_data_path, orders_df, monkeypatch
+def test_accept_persists_contract_data_flow_loads(
+    tmp_path, registry, synthetic_data_path, monkeypatch
 ):
     monkeypatch.setenv("DQ_AGENT_APPROVER", "jacopo")
     graph, config = _scoping_graph(tmp_path, registry, synthetic_data_path, "approved!")
@@ -300,14 +326,10 @@ def test_accept_persists_approved_contract_the_engine_runs(
     result = graph.invoke(Command(resume={"decisions": [{"type": "approve"}]}), config)
 
     assert result["messages"][-1].content == "approved!"
-    contract = Contract.from_yaml(tmp_path / "orders.yaml")
-    assert contract.approved_at is not None
-    assert contract.approved_by == "jacopo"
-
-    # the artifact is directly executable by the deterministic engine
-    results = run(contract, orders_df, registry)
-    assert results[0].rule_id == "null_check"
-    assert results[0].error is None
+    # saved under the data-flow name and accepted by the data-flow loader as is
+    loaded = load_contract(tmp_path / "synthetic.orders.yaml")
+    assert loaded["approval"]["approved_by"] == "jacopo"
+    assert loaded["suite"]["expectations"][0]["kwargs"] == {"column": "order_id"}
 
 
 def test_reject_decision_does_not_approve(tmp_path, registry, synthetic_data_path):
@@ -334,7 +356,7 @@ def test_edit_decision_persists_modified_contract(
     graph.invoke({"messages": [HumanMessage("scope orders.csv")]}, config)
 
     edited = graph.get_state(config).values["draft"]
-    edited["rules"][0]["params"]["max_null_rate"] = 0.0  # a valid tweak by the owner
+    edited["suite"]["expectations"][0]["kwargs"]["mostly"] = 0.9  # a valid tweak by the owner
     graph.invoke(
         Command(resume={"decisions": [{
             "type": "edit",
@@ -343,9 +365,9 @@ def test_edit_decision_persists_modified_contract(
         config,
     )
 
-    contract = Contract.from_yaml(tmp_path / "orders.yaml")
-    assert contract.approved_at is not None
-    assert contract.rules[0].params["max_null_rate"] == 0.0
+    contract = Contract.from_yaml(tmp_path / "synthetic.orders.yaml")
+    assert contract.approval is not None
+    assert contract.suite.expectations[0].kwargs["mostly"] == 0.9
 
 
 def test_text_string_approve_persists(tmp_path, registry, synthetic_data_path, monkeypatch):
@@ -355,7 +377,7 @@ def test_text_string_approve_persists(tmp_path, registry, synthetic_data_path, m
     graph.invoke({"messages": [HumanMessage("scope orders.csv")]}, config)
     graph.invoke(Command(resume="approve"), config)
 
-    assert (tmp_path / "orders.yaml").exists()
+    assert (tmp_path / "synthetic.orders.yaml").exists()
 
 
 def _converse_tool_stream(name, args, call_id):
@@ -394,7 +416,7 @@ def test_streamed_run_still_pauses_on_the_approval_interrupt(
         _converse_tool_stream("profile_dataset", {"path": csv}, "c1"),
         _converse_tool_stream(
             "propose_contract",
-            {"rules": [{"rule_id": "null_check", "params": {"column": "order_id"}}]},
+            {"expectations": [{"expectation_type": "expect_column_values_to_not_be_null", "kwargs": {"column": "order_id"}}], "table": "synthetic.orders"},
             "c2",
         ),
         _converse_tool_stream("request_approval", {}, "c3"),

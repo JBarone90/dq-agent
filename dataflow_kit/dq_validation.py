@@ -133,7 +133,7 @@ ALLOWED_EXPECTATIONS: dict[str, dict[str, dict[str, Callable[[Any], str | None]]
     },
     "expect_column_values_to_be_in_type_list": {
         "required": {"column": _string, "type_list": _string_list},
-        "optional": {"mostly": _fraction},
+        "optional": {},
     },
     "expect_column_min_to_be_between": {
         "required": {"column": _string, "min_value": _freshness_bound},
@@ -167,12 +167,12 @@ def load_contract(path: str | Path) -> dict[str, Any]:
 
 
 def validate_contract(contract: Any) -> None:
-    errors = _contract_errors(contract)
+    errors = contract_errors(contract)
     if errors:
         raise ContractError("invalid contract:\n- " + "\n- ".join(errors))
 
 
-def _contract_errors(contract: Any) -> list[str]:
+def contract_errors(contract: Any) -> list[str]:
     if not isinstance(contract, dict):
         return ["contract must be a mapping"]
     errors = _unknown_keys(contract, {"contract_version", "gx_version", "dataset", "approval", "suite"}, "contract")
@@ -213,11 +213,11 @@ def _contract_errors(contract: Any) -> list[str]:
     if not isinstance(expectations, list) or not expectations:
         return errors + ["suite.expectations must be a non-empty list"]
     for index, expectation in enumerate(expectations):
-        errors += _expectation_errors(index, expectation)
+        errors += expectation_errors(index, expectation)
     return errors
 
 
-def _expectation_errors(index: int, expectation: Any) -> list[str]:
+def expectation_errors(index: int, expectation: Any) -> list[str]:
     if not isinstance(expectation, dict):
         return [f"expectation #{index}: must be a mapping"]
     kind = expectation.get("expectation_type")

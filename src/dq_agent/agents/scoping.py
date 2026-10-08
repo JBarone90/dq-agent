@@ -8,8 +8,9 @@ project's own HITL contract (`action_requests` + `review_configs`), consumed by 
 local driver (a CLI or a Streamlit chat panel) that supplies the resume decision.
 
 The LLM never sees raw cell values (`profiler.redact()`) and never executes rules —
-its only product is a draft contract. Approval stamps `approved_at`/`approved_by` and
-persists the canonical YAML artifact; from there the deterministic engine takes over.
+its only product is a draft contract: a Great Expectations 0.18.2 suite in the data-flow
+envelope. Approval stamps `approval` and persists `<schema>.<table>.yaml`; from there the
+data-flow Airflow task (`dataflow_kit/`) runs it.
 
 Drive locally with the CLI in `scripts/scoping_cli.py`. Any driver must compile the
 graph with a checkpointer (see `build_graph(checkpointer=...)`): `interrupt()` cannot
@@ -21,8 +22,6 @@ from __future__ import annotations
 import getpass
 import json
 import os
-import re
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -34,8 +33,9 @@ from langgraph.prebuilt import InjectedState, ToolNode
 from langgraph.types import Command, interrupt
 from pydantic import field_validator
 
+from dataflow_kit import dq_validation
 from dq_agent import connectors, profiler
-from dq_agent.models import Contract, ContractRule
+from dq_agent.models import Contract, Expectation
 from dq_agent.registry import Registry
 from dq_agent.report import describe_contract
 
@@ -59,15 +59,15 @@ class ScopingState(MessagesState):
     contract_path: str | None  # set once the approved YAML artifact is persisted
 
 
-class ProposedRule(ContractRule):
-    """A contract rule as proposed by the agent — same shape, separate name so the
+class ProposedExpectation(Expectation):
+    """An expectation as proposed by the agent — same shape, separate name so the
     tool schema reads as a proposal, not an approved artifact."""
 
-    @field_validator("params", mode="before")
+    @field_validator("kwargs", mode="before")
     @classmethod
     def _coerce_json_string(cls, value: Any) -> Any:
         # Some models (smaller ones especially, e.g. the gemini *-flash-lite tier)
-        # serialize the nested params object as a JSON string instead of an object.
+        # serialize the nested kwargs object as a JSON string instead of an object.
         # Parse it here so the first tool call validates, rather than relying on the
         # model to notice and retry.
         if isinstance(value, str):
@@ -150,40 +150,50 @@ def _make_tools(registry: Registry) -> list:
 
     @tool
     def list_rules(tags: list[str] | None = None) -> str:
-        """List the rules available in the registry, optionally filtered by tags
-        (e.g. completeness, uniqueness, validity, freshness, volume). Returns each
-        rule's id, description, tags, default severity and parameter specs."""
+        """List the Great Expectations expectations a contract may use, optionally
+        filtered by tags (e.g. completeness, uniqueness, validity, conformance,
+        freshness, volume). Returns each expectation_type with its description, tags
+        and kwargs."""
         lines = []
         for rule_id in registry.rule_ids:
             rule = registry.get(rule_id)
             if tags and not set(tags) & set(rule.tags):
                 continue
-            params = ", ".join(
-                f"{name}: {spec.type}"
-                + ("" if spec.required else f" = {spec.default!r}")
-                for name, spec in rule.parameters.items()
+            kwargs = "\n".join(
+                f"    {name}: {spec.type}{' (required)' if spec.required else ''}"
+                + (f" — {spec.description}" if spec.description else "")
+                for name, spec in rule.kwargs.items()
             )
             lines.append(
-                f"- {rule.id} [{', '.join(rule.tags)}] (severity: {rule.severity})\n"
+                f"- {rule.id} [{', '.join(rule.tags)}]\n"
                 f"  {rule.description}\n"
-                f"  params: {params or 'none'}"
+                f"  kwargs:\n{kwargs}"
             )
         return "\n".join(lines) or "no rules match those tags"
 
     @tool
     def propose_contract(
-        rules: list[ProposedRule],
+        expectations: list[ProposedExpectation],
         state: Annotated[dict, InjectedState],
         tool_call_id: Annotated[str, InjectedToolCallId],
+        table: str | None = None,
     ) -> Command:
-        """Propose a draft contract for the profiled dataset: the list of rule ids
-        with parameters (and optional severity overrides) you recommend. The draft
-        is validated against the registry and shown to the owner for discussion —
-        it is not approved or executed by this call.
+        """Propose a draft contract for the profiled dataset: the Great Expectations
+        expectations you recommend, each with its expectation_type, kwargs and an
+        optional meta note for the monitoring dashboard. The draft is validated against
+        the data-flow allowlist and shown to the owner for discussion — it is not
+        approved or executed by this call.
 
-        Each rule's `params` must be a JSON object (dict), not a string. Example:
-          {"rule_id": "null_check", "params": {"column": "email"}}
-          {"rule_id": "range_check", "params": {"column": "amount", "min_val": 0}}
+        `table` is the schema-qualified Postgres table the contract will run against
+        ('schema.table'). Omit it when you profiled that table with profile_table;
+        for a local file, ask the owner which table it is and pass it.
+
+        Each `kwargs` must be a JSON object (dict), not a string. Example:
+          {"expectation_type": "expect_column_values_to_not_be_null",
+           "kwargs": {"column": "email"},
+           "meta": {"notes": {"format": "string", "content": "Every customer needs an email"}}}
+          {"expectation_type": "expect_column_values_to_be_between",
+           "kwargs": {"column": "amount", "min_value": 0}}
         """
         report = state.get("profile")
         if report is None:
@@ -193,28 +203,35 @@ def _make_tools(registry: Registry) -> list:
                 )
             ]})
 
-        errors = _validate_rules(rules, registry)
+        target = table or state.get("source_table")
+        if not target or target.count(".") != 1:
+            return Command(update={"messages": [ToolMessage(
+                "error: which Postgres table will this contract run against? Ask the "
+                "owner and pass it as table='schema.table'",
+                tool_call_id=tool_call_id,
+            )]})
+
+        schema, name = target.split(".")
+        draft = Contract.draft(
+            schema, name, [Expectation(**e.model_dump()) for e in expectations]
+        )
+        errors = draft.problems()
         if errors:
             return Command(update={"messages": [
                 ToolMessage("invalid proposal: " + "; ".join(errors),
                             tool_call_id=tool_call_id)
             ]})
 
-        draft = Contract(
-            dataset=report["dataset"],
-            columns={c["name"]: c["dtype"] for c in report["columns"]},
-            rules=[ContractRule(**r.model_dump()) for r in rules],
-        )
         message = ("draft recorded. Summarize it for the owner in plain English:\n"
                    + describe_contract(draft, registry))
         # A sampled profile's min/max are estimates, so confirm any proposed range bound
         # against the live table — but only then, and only for the referenced columns.
         if report.get("sampled") and state.get("source_table"):
-            notes = _confirm_range_bounds(draft.rules, state["source_table"])
+            notes = _confirm_range_bounds(draft.suite.expectations, state["source_table"])
             if notes:
                 message += "\n\nConfirmed range bounds against the full table:\n- " + "\n- ".join(notes)
         return Command(update={
-            "draft": draft.model_dump(mode="json"),
+            "draft": draft.to_dict(),
             "messages": [ToolMessage(message, tool_call_id=tool_call_id)],
         })
 
@@ -228,14 +245,15 @@ def _make_tools(registry: Registry) -> list:
     return [profile_dataset, profile_table, list_rules, propose_contract, request_approval]
 
 
-def _confirm_range_bounds(rules: list[ContractRule], table: str) -> list[str]:
-    """Confirm proposed range_check bounds against the full table and flag any that
+def _confirm_range_bounds(expectations: list[Expectation], table: str) -> list[str]:
+    """Confirm proposed range bounds against the full table and flag any that
     existing rows would already violate. Called only when the profile is a *sample*
     (observed min/max are estimates) and the source is a Postgres table, so it runs an
-    exact `min/max` query solely for the columns a range_check references — never
+    exact `min/max` query solely for the columns a range expectation references — never
     speculatively, and at most once per column. Returns human-readable notes, empty
     when every bound checks out."""
-    range_rules = [r for r in rules if r.rule_id == "range_check"]
+    range_rules = [e for e in expectations
+                   if e.expectation_type == "expect_column_values_to_be_between"]
     if not range_rules:
         return []
     try:
@@ -246,7 +264,7 @@ def _confirm_range_bounds(rules: list[ContractRule], table: str) -> list[str]:
     notes: list[str] = []
     seen: dict[str, tuple] = {}
     for rule in range_rules:
-        col = rule.params.get("column")
+        col = rule.kwargs.get("column")
         if not col:
             continue
         try:
@@ -254,30 +272,20 @@ def _confirm_range_bounds(rules: list[ContractRule], table: str) -> list[str]:
                 seen[col] = connectors.column_bounds(uri, table, col)
             lo, hi = seen[col]
             problems = []
-            proposed_min, proposed_max = rule.params.get("min_val"), rule.params.get("max_val")
+            proposed_min, proposed_max = rule.kwargs.get("min_value"), rule.kwargs.get("max_value")
             if proposed_min is not None and lo is not None and lo < proposed_min:
-                problems.append(f"actual min {lo} is below the proposed min_val {proposed_min}")
+                problems.append(f"actual min {lo} is below the proposed min_value {proposed_min}")
             if proposed_max is not None and hi is not None and hi > proposed_max:
-                problems.append(f"actual max {hi} is above the proposed max_val {proposed_max}")
+                problems.append(f"actual max {hi} is above the proposed max_value {proposed_max}")
         except (ValueError, ImportError, TypeError) as exc:
-            notes.append(f"range_check on '{col}': could not confirm bounds ({exc})")
+            notes.append(f"range on '{col}': could not confirm bounds ({exc})")
             continue
         if problems:
             notes.append(
-                f"range_check on '{col}': " + "; ".join(problems)
+                f"range on '{col}': " + "; ".join(problems)
                 + " — existing rows would violate this bound; confirm the real limit with the owner."
             )
     return notes
-
-
-def _validate_rules(rules: list[ContractRule], registry: Registry) -> list[str]:
-    errors = []
-    for rule in rules:
-        try:
-            errors.extend(registry.validate_params(rule.rule_id, rule.params))
-        except KeyError:
-            errors.append(f"unknown rule '{rule.rule_id}'")
-    return errors
 
 
 _ACCEPT_WORDS = {"accept", "approve", "approved", "yes", "y", "looks good", "go ahead"}
@@ -361,22 +369,27 @@ def _approval_node(contracts_dir: Path, registry: Registry):
 
         if kind == "edit":
             edited = decision.get("edited_action") or {}
-            contract = Contract.model_validate(edited.get("args", {}).get("contract", {}))
-            errors = _validate_rules(contract.rules, registry)
+            try:
+                contract = Contract.model_validate(edited.get("args", {}).get("contract", {}))
+            except ValueError as exc:
+                return respond(f"owner's edited contract is malformed, fix and re-propose: {exc}")
+            errors = contract.problems()
             if errors:
                 return respond("owner's edited contract is invalid, fix and re-propose: "
                                + "; ".join(errors))
             kind = "approve"
 
         if kind == "approve":
-            contract.approved_at = datetime.now(timezone.utc)
-            contract.approved_by = _approver(decision.get("args"))
+            contract.approve(_approver(decision.get("args")))
+            # the data-flow layout: one contract per table, <schema>.<table>.yaml
+            path = dq_validation.contract_path(
+                contract.dataset.schema_, contract.dataset.table, root=contracts_dir
+            )
+            dq_validation.validate_contract(contract.to_dict())  # exactly what data-flow loads
             contracts_dir.mkdir(parents=True, exist_ok=True)
-            filename = re.sub(r"[^A-Za-z0-9_-]", "_", contract.dataset) + ".yaml"
-            path = contracts_dir / filename
-            path.write_text(contract.to_yaml())
+            path.write_text(contract.to_yaml(), encoding="utf-8")
             return respond(
-                f"contract approved by {contract.approved_by} and saved to {path}",
+                f"contract approved by {contract.approval.approved_by} and saved to {path}",
                 draft=None,
                 contract_path=str(path),
             )

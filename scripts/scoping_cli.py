@@ -5,7 +5,7 @@ server. This script is the in-process replacement: it compiles the scoping graph
 supplies its own checkpointer, and runs the full conversation + human approval loop
 from the terminal. The agent profiles a dataset, proposes a contract, and pauses at
 the approval gate; you approve or send feedback, and an approved contract is written
-to `contracts/<dataset>.yaml`.
+to `contracts/<schema>.<table>.yaml`.
 
 Why a checkpointer at all: the approval gate is a LangGraph `interrupt()`. It pauses
 the run by persisting it to the checkpointer (keyed by `thread_id`) and resumes by

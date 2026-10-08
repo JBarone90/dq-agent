@@ -1,0 +1,8 @@
+id: expect_table_row_count_to_be_between
+name: Row count
+description: Fails if the table's row count is outside [min_value, max_value]. Table-level; at least one bound is required.
+tags: [volume]
+kwargs:
+  min_value: {type: int, description: minimum number of rows}
+  max_value: {type: int, description: maximum number of rows}
+summary: "the row count must be between {min_value} and {max_value}"

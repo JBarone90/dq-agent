@@ -1,0 +1,8 @@
+id: expect_column_values_to_be_unique
+name: Unique
+description: Fails if any non-null value appears more than once in the column.
+tags: [uniqueness]
+kwargs:
+  column: {type: str, required: true}
+  mostly: {type: float, description: fraction of rows that must be unique (default 1.0)}
+summary: "`{column}` must be unique (no duplicate values)"

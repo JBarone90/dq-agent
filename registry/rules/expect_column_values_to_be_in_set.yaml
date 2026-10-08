@@ -1,0 +1,9 @@
+id: expect_column_values_to_be_in_set
+name: Allowed values
+description: Fails if any non-null value is not in value_set.
+tags: [validity]
+kwargs:
+  column: {type: str, required: true}
+  value_set: {type: list, required: true, description: the allowed values (non-empty)}
+  mostly: {type: float, description: fraction of rows that must be in the set (default 1.0)}
+summary: "`{column}` must be one of: {value_set}"

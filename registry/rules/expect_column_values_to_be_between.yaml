@@ -1,0 +1,12 @@
+id: expect_column_values_to_be_between
+name: Range
+description: Fails if any non-null value falls outside [min_value, max_value]. At least one bound is required; bounds are inclusive unless strict_min / strict_max is true.
+tags: [validity]
+kwargs:
+  column: {type: str, required: true}
+  min_value: {type: float, description: lower bound}
+  max_value: {type: float, description: upper bound}
+  strict_min: {type: bool, description: exclude min_value itself (default false)}
+  strict_max: {type: bool, description: exclude max_value itself (default false)}
+  mostly: {type: float, description: fraction of rows that must be in range (default 1.0)}
+summary: "`{column}` must be between {min_value} and {max_value}"

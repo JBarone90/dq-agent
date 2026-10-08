@@ -1,58 +1,89 @@
-"""Shared models: the contract that gates execution and the result schema pipelines consume.
+"""The contract: the scoping agent's only product, and what data-flow runs.
 
-A Contract is the product of scoping plus human approval — the Phase 3 scoping agent
-produces it through the approval gate; contracts can also be hand-written YAML (see
-contracts/examples/). Approval is recorded as `approved_at` + `approved_by`; the engine
-refuses contracts without `approved_at`. `columns` snapshots the schema the contract was
-scoped against (name -> dtype string) so the engine can detect drift before running.
+A contract is a Great Expectations 0.18.2 suite in a small envelope (see `dataflow_kit/dq_validation.py`, which validates and runs it in Airflow). Expectation names and kwargs are GX-native. `approval` is stamped by the human approval gate; data-flow refuses a contract without it. Contracts are stored one per table as `<schema>.<table>.yaml`.
 
-A RuleResult is the engine's output unit: `violation_rate` is a measured 0-1 rate, or
-None when the rule was never evaluated (`error` set). `severity` is the *effective*
-severity stamped by the engine — the contract's per-rule override if present, else the
-registry default — so downstream consumers can act on a result alone (fail on `error`,
-log on `warning`) without re-joining the registry.
+Validity is defined in one place: `problems()` delegates to the data-flow allowlist, so whatever the agent saves is exactly what data-flow will accept.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
+
+from dataflow_kit import dq_validation
 
 
-class RuleResult(BaseModel):
-    rule_id: str
-    passed: bool
-    # None means the rule was never evaluated (error is set); 0.0 means measured clean
-    violation_rate: float | None
-    error: str | None = None
-    severity: str | None = None  # stamped by the engine, not by rule functions
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
 
-class ContractRule(BaseModel):
-    rule_id: str
-    params: dict[str, Any]
-    # severity is a property of the rule *in context*: None defers to the registry default
-    severity: str | None = None
+class Notes(_Strict):
+    format: Literal["string", "markdown"] = "string"
+    content: str
 
 
-class Contract(BaseModel):
-    dataset: str
-    approved_at: datetime | None = None
-    approved_by: str | None = None
-    # schema snapshot at approval time (column name -> dtype string); None skips drift check
-    columns: dict[str, str] | None = None
-    rules: list[ContractRule]
+class Meta(_Strict):
+    notes: Notes  # short description surfaced on the data-flow monitoring dashboard
+
+
+class Expectation(_Strict):
+    expectation_type: str
+    kwargs: dict[str, Any]
+    meta: Meta | None = None
+
+
+class Dataset(_Strict):
+    # `schema` shadows a BaseModel attribute, so the field is schema_ under the YAML alias
+    schema_: str = Field(alias="schema")
+    table: str
+
+    @property
+    def name(self) -> str:
+        return f"{self.schema_}.{self.table}"
+
+
+class Approval(_Strict):
+    approved_at: datetime
+    approved_by: str
+
+
+class Suite(_Strict):
+    name: str
+    expectations: list[Expectation]
+
+
+class Contract(_Strict):
+    contract_version: int = dq_validation.CONTRACT_VERSION
+    gx_version: str = dq_validation.GX_VERSION
+    dataset: Dataset
+    approval: Approval | None = None
+    suite: Suite
+
+    @classmethod
+    def draft(cls, schema: str, table: str, expectations: list[Expectation]) -> Contract:
+        dataset = Dataset(schema=schema, table=table)
+        return cls(dataset=dataset, suite=Suite(name=dataset.name, expectations=expectations))
+
+    def approve(self, approved_by: str) -> None:
+        self.approval = Approval(approved_at=datetime.now(timezone.utc), approved_by=approved_by)
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json", by_alias=True, exclude_none=True)
 
     def to_yaml(self) -> str:
-        return yaml.safe_dump(
-            self.model_dump(mode="json", exclude_none=True), sort_keys=False
-        )
+        return yaml.safe_dump(self.to_dict(), sort_keys=False, allow_unicode=True)
 
     @classmethod
     def from_yaml(cls, source: str | Path) -> Contract:
-        text = source.read_text() if isinstance(source, Path) else source
+        text = source.read_text(encoding="utf-8") if isinstance(source, Path) else source
         return cls.model_validate(yaml.safe_load(text))
+
+    def problems(self) -> list[str]:
+        """Everything data-flow would reject, except a missing approval (the gate adds it)."""
+        data = self.to_dict()
+        data.setdefault("approval", {"approved_at": "pending", "approved_by": "pending"})
+        return dq_validation.contract_errors(data)

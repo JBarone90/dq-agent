@@ -1,69 +1,47 @@
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
-from dq_agent.models import Contract, ContractRule, RuleResult
+from dataflow_kit.dq_validation import validate_contract
+from dq_agent.models import Contract, Expectation
+
+EXAMPLE = Path(__file__).parent.parent / "dataflow_kit" / "dq_contracts" / "synthetic.orders.yaml"
 
 
-def test_rule_result_passed():
-    r = RuleResult(rule_id="null_check", passed=True, violation_rate=0.01)
-    assert r.passed is True
-    assert r.error is None
+def _draft(*expectations: Expectation) -> Contract:
+    return Contract.draft("synthetic", "orders", list(expectations))
 
 
-def test_rule_result_failed():
-    r = RuleResult(rule_id="null_check", passed=False, violation_rate=0.1)
-    assert r.passed is False
+def test_draft_fills_envelope():
+    c = _draft(Expectation(expectation_type="expect_column_values_to_be_unique",
+                           kwargs={"column": "order_id"}))
+    assert c.suite.name == "synthetic.orders"
+    assert c.gx_version == "0.18.2"
+    assert c.approval is None
+    assert c.problems() == []
 
 
-def test_rule_result_with_error():
-    r = RuleResult(rule_id="null_check", passed=False, violation_rate=0.1, error="column missing")
-    assert r.error == "column missing"
+def test_problems_come_from_the_data_flow_allowlist():
+    c = _draft(Expectation(expectation_type="expect_column_values_to_be_unique",
+                           kwargs={"column": "order_id", "evil": 1}))
+    assert any("unexpected kwarg 'evil'" in p for p in c.problems())
 
 
-def test_rule_result_rejects_missing_fields():
-    with pytest.raises(ValidationError):
-        RuleResult(rule_id="null_check", passed=True)
+def test_approved_contract_is_what_data_flow_loads():
+    c = _draft(Expectation(expectation_type="expect_column_values_to_be_unique",
+                           kwargs={"column": "order_id"}))
+    c.approve("jacopo")
+    validate_contract(Contract.from_yaml(c.to_yaml()).to_dict())  # does not raise
 
 
-def test_contract_parses():
-    c = Contract(
-        dataset="orders",
-        rules=[ContractRule(rule_id="null_check", params={"column": "customer_id", "max_null_rate": 0.0})],
-    )
-    assert len(c.rules) == 1
-    assert c.approved_at is None
-
-
-def test_contract_rejects_missing_dataset():
-    with pytest.raises(ValidationError):
-        Contract(rules=[])
-
-
-def test_contract_approval_fields_default_to_none():
-    c = Contract(dataset="orders", rules=[])
-    assert c.approved_by is None
-    assert c.columns is None
-
-
-def test_contract_yaml_round_trip():
-    c = Contract(
-        dataset="orders",
-        approved_at="2026-06-12T00:00:00Z",
-        approved_by="jacopo",
-        columns={"order_id": "Int64", "amount": "Float64"},
-        rules=[
-            ContractRule(
-                rule_id="null_check",
-                params={"column": "customer_id", "max_null_rate": 0.0},
-                severity="warning",
-            )
-        ],
-    )
-    assert Contract.from_yaml(c.to_yaml()) == c
-
-
-def test_contract_yaml_omits_unset_optionals():
-    c = Contract(dataset="orders", rules=[ContractRule(rule_id="null_check", params={})])
+def test_yaml_round_trip_keeps_schema_alias():
+    c = Contract.from_yaml(EXAMPLE)
     text = c.to_yaml()
-    assert "approved_at" not in text
-    assert "severity" not in text
+    assert "schema: synthetic" in text
+    assert Contract.from_yaml(text) == c
+
+
+def test_unknown_key_rejected():
+    with pytest.raises(ValidationError):
+        Contract.model_validate({**Contract.from_yaml(EXAMPLE).to_dict(), "checkpoint": {}})

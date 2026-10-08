@@ -3,16 +3,16 @@
 PURPOSE
 -------
 The unit tests here verify that `score_contract()` (in src/dq_agent/harness.py)
-computes recall/precision correctly.  The integration test at the bottom runs the
+computes recall correctly.  The integration test at the bottom runs the
 *real* scoping agent against orders.csv and asserts that it catches every known
 issue.  Together they form the regression suite for any change to the system
 prompt, the LLM model, or the rule registry.
 
 GROUND TRUTH
 ------------
-`ORDERS_EXPECTED_FAILURES` is the hand-written answer key for
-data/synthetic/orders.csv.  Every intentional dirty row is listed as a
-(rule_id, column) pair.  If you add a new dirty column to orders.csv, add an
+`ORDERS_EXPECTED_CHECKS` is the hand-written answer key for
+data/synthetic/orders.csv.  Every intentional dirty row is covered by a
+(expectation_type, column) pair.  If you add a new dirty column to orders.csv, add an
 entry here.  If you add a new synthetic dataset, create a new `frozenset` in a
 new test file following the same pattern.
 
@@ -41,133 +41,63 @@ ADDING A NEW DATASET
 --------------------
 1. Create data/synthetic/<name>.csv with known dirty rows.
 2. Document the dirty rows in tests/conftest.py (follow the orders pattern).
-3. Create a new `frozenset` of (rule_id, column) expected failures.
-4. Add a hand-written ideal contract as a sanity check (equivalent to
-   `IDEAL_RULES` below).
-5. Add an integration test that scopes the new dataset and asserts recall.
+3. Create a new `frozenset` of (expectation_type, column) expected checks.
+4. Add an integration test that scopes the new dataset and asserts recall.
 """
-
-import datetime
-from datetime import timezone
 
 import pytest
 
 from dq_agent.harness import score_contract
-from dq_agent.models import Contract, ContractRule
-from tests.conftest import EMAIL_PATTERN, FRESHNESS_THRESHOLD_DAYS, VALID_STATUSES
+from dq_agent.models import Contract, Expectation
 
-APPROVED_AT = datetime.datetime(2026, 6, 12, tzinfo=timezone.utc)
+NOT_NULL = "expect_column_values_to_not_be_null"
+UNIQUE = "expect_column_values_to_be_unique"
 
-# Ground truth: every known issue baked into data/synthetic/orders.csv.
-# A tuple is (rule_id, column); None column means a table-level rule.
-ORDERS_EXPECTED_FAILURES = frozenset({
-    ("null_check", "customer_id"),   # 2 nulls in customer_id
-    ("unique_check", "order_id"),    # 1 duplicate order_id
-    ("range_check", "amount"),       # 1 negative amount
-    ("regex_match", "email"),        # 1 malformed email
-    ("allowed_values", "status"),    # 1 invalid status value
-    ("freshness", "created_at"),     # 1 stale date
+# Ground truth: the check that covers each known issue in data/synthetic/orders.csv.
+# A tuple is (expectation_type, column); None column means a table-level check.
+ORDERS_EXPECTED_CHECKS = frozenset({
+    (NOT_NULL, "customer_id"),                                # 2 nulls in customer_id
+    (UNIQUE, "order_id"),                                     # 1 duplicate order_id
+    ("expect_column_values_to_be_between", "amount"),         # 1 negative amount
+    ("expect_column_values_to_match_regex", "email"),         # 1 malformed email
+    ("expect_column_values_to_be_in_set", "status"),          # 1 invalid status value
+    ("expect_column_min_to_be_between", "created_at"),        # 1 stale date
 })
 
-IDEAL_RULES = [
-    ContractRule(rule_id="null_check", params={"column": "customer_id", "max_null_rate": 0.0}),
-    ContractRule(rule_id="unique_check", params={"column": "order_id"}),
-    ContractRule(rule_id="range_check", params={"column": "amount", "min_val": 0.0}),
-    ContractRule(
-        rule_id="regex_match",
-        params={"column": "email", "pattern": EMAIL_PATTERN},
-    ),
-    ContractRule(
-        rule_id="allowed_values",
-        params={"column": "status", "values": list(VALID_STATUSES)},
-    ),
-    ContractRule(
-        rule_id="freshness",
-        params={"column": "created_at", "max_days": FRESHNESS_THRESHOLD_DAYS,
-                "as_of": datetime.date(2026, 6, 12)},
-    ),
-]
+
+def _contract(*checks: tuple[str, str | None]) -> Contract:
+    return Contract.draft("synthetic", "orders", [
+        Expectation(expectation_type=t, kwargs={"column": c} if c else {}) for t, c in checks
+    ])
 
 
-def _contract(*rules: ContractRule) -> Contract:
-    return Contract(dataset="orders", approved_at=APPROVED_AT, rules=list(rules))
-
-
-def test_ideal_contract_scores_perfect_recall(orders_df, registry):
-    score = score_contract(
-        _contract(*IDEAL_RULES), orders_df, registry, ORDERS_EXPECTED_FAILURES
-    )
+def test_full_coverage_scores_perfect_recall():
+    score = score_contract(_contract(*ORDERS_EXPECTED_CHECKS), ORDERS_EXPECTED_CHECKS)
     assert score.recall == 1.0
     assert score.missed == []
-    assert score.spurious == []
-    assert len(score.caught) == len(ORDERS_EXPECTED_FAILURES)
+    assert score.extra == []
 
 
-def test_partial_contract_misses_uncovered_issues(orders_df, registry):
-    partial = _contract(
-        ContractRule(rule_id="null_check", params={"column": "customer_id", "max_null_rate": 0.0}),
-        ContractRule(rule_id="unique_check", params={"column": "order_id"}),
+def test_partial_contract_misses_uncovered_issues():
+    score = score_contract(
+        _contract((NOT_NULL, "customer_id"), (UNIQUE, "order_id")), ORDERS_EXPECTED_CHECKS
     )
-    score = score_contract(partial, orders_df, registry, ORDERS_EXPECTED_FAILURES)
-
-    assert ("null_check", "customer_id") in score.caught
-    assert ("unique_check", "order_id") in score.caught
-    assert score.recall < 1.0
-    assert len(score.missed) == len(ORDERS_EXPECTED_FAILURES) - 2
-
-
-def test_empty_contract_misses_all_issues(orders_df, registry):
-    score = score_contract(_contract(), orders_df, registry, ORDERS_EXPECTED_FAILURES)
-    assert score.recall == 0.0
-    assert score.caught == []
-    assert len(score.missed) == len(ORDERS_EXPECTED_FAILURES)
-
-
-def test_spurious_rule_detected(orders_df, registry):
-    """A rule that fails for an issue not in expected_failures is spurious."""
-    # amount has 1 null — null_check on amount fails but is not in expected_failures
-    contract = _contract(
-        ContractRule(rule_id="null_check", params={"column": "customer_id", "max_null_rate": 0.0}),
-        ContractRule(rule_id="null_check", params={"column": "amount", "max_null_rate": 0.0}),
-    )
-    score = score_contract(contract, orders_df, registry, ORDERS_EXPECTED_FAILURES)
-
-    assert ("null_check", "customer_id") in score.caught
-    assert ("null_check", "amount") in score.spurious
-    assert score.precision < 1.0
-
-
-def test_error_results_do_not_count_as_caught(orders_df, registry):
-    """Misconfigured rules (missing required param) produce errors, not data catches."""
-    contract = _contract(
-        ContractRule(rule_id="null_check", params={}),  # missing required 'column'
-    )
-    score = score_contract(contract, orders_df, registry, ORDERS_EXPECTED_FAILURES)
-    assert score.caught == []
-    assert score.recall == 0.0
-
-
-def test_clean_column_rule_not_in_caught_or_spurious(orders_df, registry):
-    """A rule that passes is neither caught nor spurious — it's just a passing check."""
-    contract = _contract(
-        ContractRule(rule_id="null_check", params={"column": "order_id"}),  # no nulls
-    )
-    score = score_contract(contract, orders_df, registry, ORDERS_EXPECTED_FAILURES)
-    assert score.caught == []
-    assert score.spurious == []
-    assert score.missed == sorted(ORDERS_EXPECTED_FAILURES)
-
-
-def test_recall_and_precision_values(orders_df, registry):
-    """Verify the arithmetic: 2 caught of 6 expected, 0 spurious → recall=1/3, precision=1.0."""
-    partial = _contract(
-        ContractRule(rule_id="null_check", params={"column": "customer_id", "max_null_rate": 0.0}),
-        ContractRule(rule_id="unique_check", params={"column": "order_id"}),
-    )
-    score = score_contract(partial, orders_df, registry, ORDERS_EXPECTED_FAILURES)
-
+    assert score.caught == sorted([(NOT_NULL, "customer_id"), (UNIQUE, "order_id")])
     assert score.recall == pytest.approx(2 / 6)
-    assert score.precision == pytest.approx(1.0)
+    assert len(score.missed) == 4
+
+
+def test_check_on_wrong_column_is_missed_and_extra():
+    score = score_contract(_contract((NOT_NULL, "amount")), ORDERS_EXPECTED_CHECKS)
+    assert (NOT_NULL, "customer_id") in score.missed
+    assert score.extra == [(NOT_NULL, "amount")]
+
+
+def test_table_level_check_keys_on_none():
+    score = score_contract(
+        _contract(("expect_table_row_count_to_be_between", None)), ORDERS_EXPECTED_CHECKS
+    )
+    assert score.extra == [("expect_table_row_count_to_be_between", None)]
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +116,7 @@ def test_recall_and_precision_values(orders_df, registry):
 #               actually guides the agent to find issues on its own. A failure
 #               here points to the system prompt or model capability.
 #
-# Both tests run against the same ORDERS_EXPECTED_FAILURES ground truth and
+# Both tests run against the same ORDERS_EXPECTED_CHECKS ground truth and
 # assert recall == 1.0, so any prompt or model change that silently degrades
 # coverage is caught by at least one of them.
 # ---------------------------------------------------------------------------
@@ -252,28 +182,22 @@ def _run_scoping_session(
     return result
 
 
-def _score_and_assert(result, orders_df, registry, label: str) -> None:
-    from datetime import datetime, timezone
-    from dq_agent.models import Contract
-
+def _score_and_assert(result, label: str) -> None:
     draft = result.get("draft")
     if draft is None:
         pytest.fail(f"[{label}] no draft in state after session completed")
 
-    contract = Contract.model_validate(draft)
-    contract.approved_at = datetime.now(timezone.utc)  # allow engine to run without approval gate
+    score = score_contract(Contract.model_validate(draft), ORDERS_EXPECTED_CHECKS)
 
-    score = score_contract(contract, orders_df, registry, ORDERS_EXPECTED_FAILURES)
-
-    print(f"\n[{label}] recall={score.recall:.2f}  precision={score.precision:.2f}")
-    print(f"  caught:   {score.caught}")
-    print(f"  missed:   {score.missed}")
-    print(f"  spurious: {score.spurious}")
+    print(f"\n[{label}] recall={score.recall:.2f}")
+    print(f"  caught: {score.caught}")
+    print(f"  missed: {score.missed}")
+    print(f"  extra:  {score.extra}")
 
     assert score.recall == 1.0, (
         f"[{label}] agent missed {len(score.missed)} known issue(s): {score.missed}\n"
-        f"caught:   {score.caught}\n"
-        f"spurious: {score.spurious}"
+        f"caught: {score.caught}\n"
+        f"extra:  {score.extra}"
     )
 
 
@@ -318,12 +242,13 @@ def test_scoping_agent_explicit_instructions(
             "Business context: this is our e-commerce orders table. Each row is a customer "
             "order with an ID, customer reference, purchase amount, email, status, creation "
             "date, and phone. Here are my requirements: "
-            "order_id and customer_id must never be null (max_null_rate: 0.0); "
+            "order_id and customer_id must never be null; "
             "order_id must be unique; "
-            "amount must be non-negative (min_val: 0.0); "
+            "amount must be non-negative; "
             "email must match a basic email pattern; "
             "status must be one of: pending, shipped, delivered, cancelled; "
-            "created_at must be no older than 365 days (use 2026-06-12 as the reference date). "
+            "no created_at date may be older than 365 days. "
+            "The contract will run against the Postgres table synthetic.orders. "
             "Please profile the dataset, propose a contract covering all of these, and "
             "request approval immediately once you have a proposal."
         ),
@@ -332,7 +257,7 @@ def test_scoping_agent_explicit_instructions(
             "the contract now."
         ),
     )
-    _score_and_assert(result, orders_df, registry, label="explicit")
+    _score_and_assert(result, label="explicit")
 
 
 @pytest.mark.integration
@@ -358,6 +283,7 @@ def test_scoping_agent_discovers_issues_from_profile(
         first_message=(
             f"I need to scope {csv_path} for data quality. "
             "It's our e-commerce orders table — each row is a customer purchase. "
+            "It will run against the Postgres table synthetic.orders. "
             "Please profile it and propose whatever checks make sense given what you find."
         ),
         nudge_message=(
@@ -365,4 +291,4 @@ def test_scoping_agent_discovers_issues_from_profile(
             "Don't wait for more input from me."
         ),
     )
-    _score_and_assert(result, orders_df, registry, label="discovery")
+    _score_and_assert(result, label="discovery")
