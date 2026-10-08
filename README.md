@@ -38,7 +38,7 @@ The Polars execution engine the project started with is retired; it is preserved
 ### Concepts
 
 - [The run side](#the-run-side)
-- [The agentic layer](#the-agentic-layer)
+- [The agentic layer](#the-agentic-layer) (incl. [creative mode](#creative-mode))
 
 ### For developers
 
@@ -235,6 +235,34 @@ Redaction is enforced in the agent's tooling: the `profile_dataset` tool always 
 #### Harness
 
 **Regression-testing the scoping agent.** The harness (`harness.py`) compares a proposed contract with the hand-written list of `(expectation_type, column)` checks that cover each known issue, reporting **recall** (did it include every one?) and any **extra** checks. It exists so that a change to the system prompt, model, or registry that silently reduces coverage of known dataset issues is caught by an assertion like `score.recall == 1.0`.
+
+#### Creative mode
+
+**Proposals to allow more GX expectations.** When an owner needs a check that no allowed expectation covers, the agent can look through the expectations Great Expectations 0.18.2 ships but the allowlist does not include (`proposals.py`): the diff between GX's registry (53 core expectations) and `ALLOWED_EXPECTATIONS`, each with its docstring summary and a Postgres-support hint read from GX's metric registry. It never invents a check of its own, and a proposal never enters a contract.
+
+How it plays out in a conversation:
+
+1. The owner asks for something nothing allowed covers, e.g. "postcodes must be 6–8 characters".
+2. The agent says so, then calls `list_unlisted_expectations`. It finds `expect_column_value_lengths_to_be_between` (Postgres: supported) and explains it to the owner.
+3. If the owner wants it, the agent calls `propose_new_expectation`, which validates the example kwargs with the same GX + policy checks contracts get and writes `proposals/2026-10-08_expect_column_value_lengths_to_be_between_<schema>.<table>.yaml`:
+
+```yaml
+status: proposed
+proposed_at: '2026-10-08T14:02:11Z'
+dataset: synthetic.orders
+expectation_type: expect_column_value_lengths_to_be_between
+gx_description: Expect the column entries to be strings with length between a minimum value and a maximum value (inclusive).
+sql_support: supported
+rationale: UK postcodes are 6-8 characters
+example_kwargs: {column: postcode, min_value: 6, max_value: 8}
+example_pass: SW1A 1AA   # invented examples — the agent never sees real values
+example_fail: SW1
+```
+
+4. The agent tells the owner the check is not in the contract yet and carries on with the contract without it.
+5. A developer reviews the file and promotes it: add the name to `ALLOWED_EXPECTATIONS` (plus optional notes in `registry/expectations.yaml`), run it once against a real table, and set `status: promoted` — see [Adding an expectation](#adding-an-expectation).
+
+The Postgres-support hint is only a hint: "supported" means every metric the expectation declares has a SQL implementation in GX; "unverified" can still work, because some expectations (e.g. `expect_column_values_to_be_in_type_list`) choose their metrics at run time. The real-table run at promotion decides.
 
 ## For developers
 
