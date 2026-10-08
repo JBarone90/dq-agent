@@ -6,7 +6,7 @@ import pytest
 from dq_agent.registry import Registry
 
 DATA_DIR = Path(__file__).parent.parent / "data" / "synthetic"
-RULES_DIR = Path(__file__).parent.parent / "registry" / "rules"
+REGISTRY_FILE = Path(__file__).parent.parent / "registry" / "expectations.yaml"
 
 # Known issues baked into orders.csv — tests assert against these exact counts.
 #
@@ -45,4 +45,4 @@ def orders_df() -> pl.DataFrame:
 
 @pytest.fixture(scope="session")
 def registry() -> Registry:
-    return Registry(RULES_DIR)
+    return Registry(REGISTRY_FILE)

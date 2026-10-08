@@ -39,7 +39,7 @@ from dq_agent.models import Contract, Expectation
 from dq_agent.registry import Registry
 from dq_agent.report import describe_contract
 
-DEFAULT_RULES_DIR = Path("registry/rules")
+DEFAULT_REGISTRY_FILE = Path("registry/expectations.yaml")
 DEFAULT_CONTRACTS_DIR = Path("contracts")
 
 # Deterministic profiling cap: the code, not the LLM, decides how much to pull. Tables
@@ -152,22 +152,28 @@ def _make_tools(registry: Registry) -> list:
     def list_rules(tags: list[str] | None = None) -> str:
         """List the Great Expectations expectations a contract may use, optionally
         filtered by tags (e.g. completeness, uniqueness, validity, conformance,
-        freshness, volume). Returns each expectation_type with its description, tags
-        and kwargs."""
+        freshness, volume). Returns each expectation_type with its description, usage
+        notes and the kwargs it accepts, as documented by Great Expectations."""
         lines = []
         for rule_id in registry.rule_ids:
             rule = registry.get(rule_id)
             if tags and not set(tags) & set(rule.tags):
                 continue
             kwargs = "\n".join(
-                f"    {name}: {spec.type}{' (required)' if spec.required else ''}"
+                f"    {name}"
+                + (f" ({spec.type})" if spec.type else "")
+                + (" [required]" if name in rule.required else "")
                 + (f" — {spec.description}" if spec.description else "")
+                + (f" Default: {spec.default!r}."
+                   if spec.default is not None and name not in rule.required
+                   and "default" not in (spec.description or "").lower() else "")
                 for name, spec in rule.kwargs.items()
             )
             lines.append(
                 f"- {rule.id} [{', '.join(rule.tags)}]\n"
                 f"  {rule.description}\n"
-                f"  kwargs:\n{kwargs}"
+                + (f"  Notes: {rule.notes}\n" if rule.notes else "")
+                + f"  kwargs:\n{kwargs}"
             )
         return "\n".join(lines) or "no rules match those tags"
 
@@ -426,7 +432,7 @@ def build_graph(
             cache_prompt=os.environ.get("DQ_AGENT_PROMPT_CACHE", "1") != "0",
         )
     if registry is None:
-        registry = Registry(DEFAULT_RULES_DIR)
+        registry = Registry(DEFAULT_REGISTRY_FILE)
 
     tools = _make_tools(registry)
     model = model.bind_tools(tools)

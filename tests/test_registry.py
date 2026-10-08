@@ -1,24 +1,41 @@
 import pytest
 
-from dataflow_kit.dq_validation import ALLOWED_EXPECTATIONS
+from dataflow_kit.dq_validation import ALLOWED_EXPECTATIONS, FORBIDDEN_KWARGS
 from dq_agent.registry import Registry, RuleDefinition
 
 
-def test_registry_matches_the_data_flow_allowlist(registry: Registry):
-    """The agent's catalogue and data-flow's allowlist must offer exactly the same
-    expectations and kwargs — otherwise the agent proposes what data-flow rejects."""
+def test_catalogue_is_the_data_flow_allowlist(registry: Registry):
     assert set(registry.rule_ids) == set(ALLOWED_EXPECTATIONS)
-    for rule_id in registry.rule_ids:
-        spec = ALLOWED_EXPECTATIONS[rule_id]
-        kwargs = registry.get(rule_id).kwargs
-        assert set(kwargs) == set(spec["required"]) | set(spec["optional"]), rule_id
-        assert {k for k, s in kwargs.items() if s.required} == set(spec["required"]), rule_id
+
+
+def test_kwargs_and_docs_come_from_gx(registry: Registry):
+    rule = registry.get("expect_column_values_to_be_in_set")
+    assert list(rule.kwargs) == ["column", "value_set", "mostly"]  # GX keys minus forbidden ones
+    assert rule.kwargs["value_set"].description == "A set of objects used for comparison."
+    assert rule.description == "Expect each column value to be in a given set."
+
+
+def test_forbidden_kwargs_never_offered(registry: Registry):
+    offered = {k for rule_id in registry.rule_ids for k in registry.get(rule_id).kwargs}
+    assert not offered & FORBIDDEN_KWARGS
+
+
+def test_policy_required_kwargs_are_flagged(registry: Registry):
+    assert registry.get("expect_column_values_to_match_regex").required == ["regex"]
+
+
+def test_notes_for_unknown_expectation_rejected(tmp_path):
+    notes = tmp_path / "notes.yaml"
+    notes.write_text("expect_something_else:\n  tags: [x]\n")
+    with pytest.raises(ValueError, match="not in the allowlist"):
+        Registry(notes)
 
 
 def test_registry_get_returns_rule_definition(registry: Registry):
     rule = registry.get("expect_column_values_to_not_be_null")
     assert isinstance(rule, RuleDefinition)
     assert "completeness" in rule.tags
+    assert rule.notes
 
 
 def test_registry_get_raises_for_unknown_rule(registry: Registry):
@@ -48,5 +65,5 @@ def test_summarize_open_bound_and_freshness(registry: Registry):
     ) == "`created_at` must have no date older than 30 days"
 
 
-def test_summarize_unknown_rule_falls_back_to_id(registry: Registry):
-    assert registry.summarize("mystery", {"column": "x"}) == "mystery"
+def test_summarize_unknown_rule_falls_back_to_name_and_kwargs(registry: Registry):
+    assert registry.summarize("mystery", {"column": "x"}) == "mystery (column=x)"

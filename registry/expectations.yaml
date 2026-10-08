@@ -1,0 +1,57 @@
+# Our layer on top of Great Expectations, for the scoping agent and the approval gate.
+#
+# Which expectations are allowed and which kwargs they take is NOT defined here: that comes
+# from the data-flow allowlist (dataflow_kit/dq_validation.py) and from GX 0.18.2 itself,
+# including each kwarg's description (the expectation's docstring). This file only adds:
+#   tags     — for list_rules filtering
+#   summary  — plain-English phrasing at the approval gate; {kwarg} placeholders are filled in
+#   notes    — when to use it and backend caveats GX's docstring does not mention
+# An allowed expectation missing here still works; it just shows its GX name at the gate.
+
+expect_column_values_to_not_be_null:
+  tags: [completeness]
+  summary: "`{column}` must never be empty"
+  notes: Use for columns the owner says are mandatory. Set mostly (e.g. 0.95) only if the owner accepts some nulls.
+
+expect_column_values_to_be_unique:
+  tags: [uniqueness]
+  summary: "`{column}` must be unique (no duplicate values)"
+  notes: Use for identifiers and keys. Nulls are ignored.
+
+expect_column_values_to_be_in_set:
+  tags: [validity]
+  summary: "`{column}` must be one of: {value_set}"
+  notes: Use for categorical columns with a known list of valid codes. Nulls are ignored; value_set must not be empty.
+
+expect_column_values_to_be_between:
+  tags: [validity]
+  summary: "`{column}` must be between {min_value} and {max_value}"
+  notes: Use for numeric or date ranges. Give at least one bound, from the owner's domain limits rather than observed min/max.
+
+expect_column_values_to_match_regex:
+  tags: [validity, conformance]
+  summary: "`{column}` must match the expected text format"
+  notes: >-
+    On Postgres the regex runs inside the database as a POSIX pattern (the ~ operator): write
+    [[:space:]] and [[:digit:]], not \s and \d. Also the way to check that a text column holds
+    numbers or dates. regex is required.
+
+expect_table_row_count_to_be_between:
+  tags: [volume]
+  summary: "the row count must be between {min_value} and {max_value}"
+  notes: Table-level, no column. Give at least one bound.
+
+expect_column_values_to_be_in_type_list:
+  tags: [validity, conformance]
+  summary: "`{column}` must be stored as {type_list}"
+  notes: >-
+    Checks the column's declared database type (names as GX reports them for Postgres, e.g.
+    INTEGER, BIGINT, NUMERIC, TEXT, VARCHAR, DATE, TIMESTAMP — confirm against a real run).
+    It does not inspect the contents of a text column; use a regex for that.
+
+expect_column_min_to_be_between:
+  tags: [freshness]
+  summary: "`{column}` must have no date older than {min_value}"
+  notes: >-
+    Freshness: fails if the oldest date is older than N days before the run. Use exactly
+    min_value {"$PARAMETER": "now() - timedelta(days=N)"}, which GX evaluates at run time.

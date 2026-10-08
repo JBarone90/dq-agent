@@ -31,10 +31,10 @@ def check(schema, table, dag_id, run_id):
     # Runs in a fresh virtualenv: every import must live inside the function.
     import os
 
-    from dataflow.dq_validation import contract_path, load_contract, run_contract
+    from dataflow.dq_validation import load_table_contract, run_contract
     from dataflow.validation_utils import gx_get_context
 
-    contract = load_contract(contract_path(schema, table))
+    contract = load_table_contract(schema, table)
     run_contract(
         gx_get_context(),
         contract,

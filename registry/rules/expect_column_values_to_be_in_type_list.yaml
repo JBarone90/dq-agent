@@ -1,8 +1,0 @@
-id: expect_column_values_to_be_in_type_list
-name: Column type
-description: Fails if the column's database type is not one of type_list (e.g. [INTEGER, BIGINT], [TIMESTAMP]). It checks the declared column type, not the contents of text; to check that a text column holds numbers or dates, use expect_column_values_to_match_regex.
-tags: [validity, conformance]
-kwargs:
-  column: {type: str, required: true}
-  type_list: {type: list, required: true, description: accepted database type names}
-summary: "`{column}` must be stored as {type_list}"

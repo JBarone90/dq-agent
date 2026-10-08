@@ -206,7 +206,7 @@ def step_6_prefix_size() -> None:
     from dwutils import bedrock
 
     from dq_agent.agents.bedrock_chat import _to_converse_tools
-    from dq_agent.agents.scoping import DEFAULT_RULES_DIR, SYSTEM_PROMPT, _make_tools
+    from dq_agent.agents.scoping import DEFAULT_REGISTRY_FILE, SYSTEM_PROMPT, _make_tools
     from dq_agent.registry import Registry
 
     info = bedrock.get_model_info(MODEL_ID)
@@ -228,7 +228,7 @@ def step_6_prefix_size() -> None:
         print(f"  {MODEL_ID} cannot count tokens; counting against {counter}.")
         print("  Claude models share a tokenizer closely, so treat this as indicative.")
 
-    tools = _to_converse_tools(_make_tools(Registry(DEFAULT_RULES_DIR)))
+    tools = _to_converse_tools(_make_tools(Registry(DEFAULT_REGISTRY_FILE)))
     request = {
         "model_id": counter,
         "system": [{"text": SYSTEM_PROMPT}],

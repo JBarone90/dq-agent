@@ -45,3 +45,25 @@ def test_yaml_round_trip_keeps_schema_alias():
 def test_unknown_key_rejected():
     with pytest.raises(ValidationError):
         Contract.model_validate({**Contract.from_yaml(EXAMPLE).to_dict(), "checkpoint": {}})
+
+
+@pytest.mark.parametrize("expectation_type, kwargs, message", [
+    ("expect_column_values_to_be_unique", {"column": "id", "row_condition": "x > 1"}, "unexpected kwarg 'row_condition'"),
+    ("expect_column_values_to_be_in_set", {"column": "s", "value_set": "a"}, "value_set must be a list"),  # GX's own check
+    ("expect_column_values_to_be_in_set", {"column": "s", "value_set": []}, "value_set must not be empty"),
+    ("expect_column_values_to_match_regex", {"column": "s"}, "missing required kwarg 'regex'"),
+    ("expect_table_row_count_to_be_between", {}, "needs at least one of min_value, max_value"),
+    ("expect_column_values_to_not_be_null", {"column": "a", "mostly": 5}, "'mostly' parameter must be between 0 and 1"),
+    ("expect_column_min_to_be_between", {"column": "d", "min_value": {"$PARAMETER": "__import__('os')"}}, "the only allowed parameter"),
+])
+def test_problems_reject(expectation_type, kwargs, message):
+    c = _draft(Expectation(expectation_type=expectation_type, kwargs=kwargs))
+    assert any(message in p for p in c.problems()), c.problems()
+
+
+def test_freshness_parameter_accepted():
+    c = _draft(Expectation(
+        expectation_type="expect_column_min_to_be_between",
+        kwargs={"column": "d", "min_value": {"$PARAMETER": "now() - timedelta(days=30)"}},
+    ))
+    assert c.problems() == []

@@ -1,8 +1,0 @@
-id: expect_column_min_to_be_between
-name: Freshness
-description: 'Fails if the oldest date in the column is older than N days before the run. min_value must be exactly {"$PARAMETER": "now() - timedelta(days=N)"}, which Great Expectations evaluates at run time.'
-tags: [freshness]
-kwargs:
-  column: {type: str, required: true}
-  min_value: {type: dict, required: true, description: '{"$PARAMETER": "now() - timedelta(days=N)"}'}
-summary: "`{column}` must have no date older than {min_value}"

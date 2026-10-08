@@ -1,9 +1,0 @@
-id: expect_column_values_to_match_regex
-name: Text format
-description: Fails if any non-null value does not match regex. On Postgres the regex runs in the database as a POSIX pattern (the ~ operator), so use POSIX classes such as [[:space:]] and [[:digit:]] rather than Python shorthands like \s and \d. Also the way to check text columns that encode numbers or dates.
-tags: [validity, conformance]
-kwargs:
-  column: {type: str, required: true}
-  regex: {type: str, required: true, description: POSIX regular expression}
-  mostly: {type: float, description: fraction of rows that must match (default 1.0)}
-summary: "`{column}` must match the expected text format"
