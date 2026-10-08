@@ -22,7 +22,7 @@ The repo has two parts:
 | Expectation catalogue (8 GX expectations)       | **Done** — tested              |
 | Scoping agent + human approval gate             | **Working dev demo** (Phase 3) |
 | data-flow kit (utility module + example DAG)    | **Pilot** — to be tried in data-flow |
-| Creative mode — novel rule proposals            | Planned (Phase 4)              |
+| Creative mode — proposals for unlisted GX expectations | **Working dev demo** (Phase 4) |
 
 The Polars execution engine the project started with is retired; it is preserved on the `feat/bedrock-proxy-adapter` branch. See [ACTION_PLAN.md](ACTION_PLAN.md) for the full roadmap.
 
@@ -147,6 +147,7 @@ dq-agent/
 │   ├── profiler.py     # dataset profiler + redact() — scoping-time facts for the LLM
 │   ├── connectors.py   # load CSV / Parquet / Postgres into a Polars DataFrame for profiling
 │   ├── report.py       # describe_contract() — contract -> plain-English approval card
+│   ├── proposals.py    # creative mode: unlisted GX expectations, proposal files
 │   ├── harness.py      # scores a proposed contract vs the checks it should contain (recall)
 │   └── agents/         # LangGraph scoping agent + human approval gate (Phase 3)
 ├── registry/expectations.yaml  # our notes per allowed expectation (tags, summary, caveats)
@@ -155,7 +156,7 @@ dq-agent/
 │   ├── dags/             # example validation-only DAG
 │   └── dq_contracts/     # one contract per table: <schema>.<table>.yaml
 ├── contracts/          # approved contracts the scoping agent persists land here (git-ignored)
-├── proposals/          # creative-mode (Phase 4) outputs — empty until that phase lands
+├── proposals/          # creative-mode proposals to allow more GX expectations — reviewed, never executed
 ├── data/synthetic/     # dirty-by-design test dataset (orders.csv)
 └── tests/
 ```
@@ -285,6 +286,8 @@ expect_column_values_to_not_be_null:
 ```
 
 3. Run it once against a real table, then copy the updated `dq_validation.py` into data-flow.
+
+You rarely start from scratch: when an owner needs a check the allowlist lacks, the agent looks through the GX expectations that are not allowed yet (`list_unlisted_expectations`) and files a proposal in `proposals/` with the owner's rationale and validated example kwargs (`propose_new_expectation`). Reviewing that file is step 0; set its `status` to `promoted` once the steps above are done.
 
 Authoring standards live in `.claude/roles/rule-author.md`.
 

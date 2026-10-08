@@ -40,7 +40,8 @@ src/dq_agent/
   agents/            ← LangGraph scoping agent; wraps profiler and registry as tools, human
                        approval gate as an interrupt(), persists approved contract YAML
 contracts/           ← approved contracts the agent persists (<schema>.<table>.yaml, git-ignored)
-proposals/           ← creative mode outputs — rule specs awaiting developer review, never executed
+proposals/           ← creative mode: proposals to allow an unlisted GX expectation (proposals.py),
+                       awaiting developer review, never executed
 data/synthetic/      ← dirty-by-design test dataset (committed); all other data excluded by .gitignore
 ```
 

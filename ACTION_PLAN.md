@@ -158,13 +158,16 @@ execute directly.
 
 _Novel rule proposals for patterns outside the registry._
 
-- [ ] During scoping, agent identifies dataset characteristics with no matching registry rule
-- [ ] Agent drafts a rule specification: name, description, rationale, suggested parameters,
+- [x] During scoping, agent identifies dataset characteristics with no matching registry rule
+- [x] Agent drafts a rule specification: name, description, rationale, suggested parameters,
       example pass/fail cases — saved as a proposal file, not an executable rule
-- [ ] Proposal format is a lightweight config that a developer can review and promote to
+- [x] Proposal format is a lightweight config that a developer can review and promote to
       the registry with minimal effort
-- [ ] Track proposals separately from approved rules (different directory, clear status field)
-- [ ] Do not execute proposal rules — they are hypotheses until promoted
+- [x] Track proposals separately from approved rules (different directory, clear status field)
+- [x] Do not execute proposal rules — they are hypotheses until promoted
+- [ ] Exit criterion not yet shown: needs a live-model scoping session where the owner asks for a check outside the allowlist
+
+Implemented on `feat/gx-contracts` (2026-10-08) with GX as the source of candidates rather than free-form rule specs: the agent can only propose expectations GX 0.18.2 already ships. `list_unlisted_expectations` is the diff between GX's expectation registry (53 core expectations) and `ALLOWED_EXPECTATIONS`, each with its docstring summary and a Postgres-support hint read from GX's metric registry ("supported" when every declared metric has a SQLAlchemy provider, else "unverified" — a hint only, since some expectations pick metrics at run time). `propose_new_expectation` validates the example kwargs with the same GX + policy checks contracts get and writes `proposals/<date>_<expectation>_<schema>.<table>.yaml` (`status: proposed`, rationale, example kwargs, invented pass/fail examples). Promotion = add the name to the allowlist, run once on a real table, set `status: promoted`. Custom (non-GX) expectations remain out of scope.
 
 **Exit criteria:** agent surfaces at least one novel rule proposal during a scoping session on
 a dataset with an unusual pattern; proposal file is readable and actionable by a developer.
