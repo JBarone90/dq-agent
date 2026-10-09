@@ -3,7 +3,7 @@
 Staged in dq-agent, copied into the `data-flow` repo at work. Three pieces make up a data quality check there, and only the third changes per table:
 
 - this module: loads a contract YAML, validates it, and runs it as an in-memory Expectation Suite + Checkpoint;
-- the validation DAG (`dags/dq_check_example.py`): calls this module from a `@task.virtualenv` task;
+- the validation DAG (`dags/dq_check_example_pipeline.py`): calls this module from a `@task.virtualenv` task;
 - the contract: `dq_contracts/<schema>.<table>.yaml`, produced by the dq-agent scoping agent and approved by the dataset owner.
 
 The contract uses GX expectation names and kwargs directly — there is no translation layer. What a contract may contain is decided here, mostly by GX itself:
@@ -261,31 +261,15 @@ def run_contract(
     expectation's meta carries the approval, so every stored result records who approved the
     rules it ran.
     """
-    from great_expectations.core.expectation_configuration import ExpectationConfiguration
-
     validate_contract(contract)  # never trust that the caller validated
     schema, table = contract["dataset"]["schema"], contract["dataset"]["table"]
     suite_name = contract["suite"]["name"]
-    # Suite-level meta stays in the in-memory suite store; each expectation's config is copied
-    # into the stored validation result, so the approval rides there to be persisted.
-    provenance = {
-        "contract_version": contract["contract_version"],
-        "approved_by": contract["approval"]["approved_by"],
-        "approved_at": str(contract["approval"]["approved_at"]),
-    }
 
     source = context.sources.add_postgres(name="datasets", connection_string=connection_string)
     asset = source.add_table_asset(name=suite_name, schema_name=schema, table_name=table)
     suite = context.add_expectation_suite(
         expectation_suite_name=suite_name,
-        expectations=[
-            ExpectationConfiguration(
-                expectation_type=e["expectation_type"],
-                kwargs=e["kwargs"],
-                meta={**e.get("meta", {}), "dq_contract": provenance},
-            )
-            for e in contract["suite"]["expectations"]
-        ],
+        expectations=expectation_configurations(contract),
     )
     checkpoint = context.add_checkpoint(
         name=checkpoint_name,
@@ -301,6 +285,29 @@ def run_contract(
     if raise_on_failure and not result["success"]:
         raise DataQualityCheckFailed(f"data quality check failed for {suite_name}:\n{summarize(result)}")
     return result
+
+
+def expectation_configurations(contract: dict[str, Any]) -> list[Any]:
+    """The contract's expectations as GX ExpectationConfigurations, each stamped with the approval.
+
+    Suite-level meta stays in the in-memory suite store; each expectation's config is copied
+    into the stored validation result, so the approval rides there to be persisted.
+    """
+    from great_expectations.core.expectation_configuration import ExpectationConfiguration
+
+    provenance = {
+        "contract_version": contract["contract_version"],
+        "approved_by": contract["approval"]["approved_by"],
+        "approved_at": str(contract["approval"]["approved_at"]),
+    }
+    return [
+        ExpectationConfiguration(
+            expectation_type=e["expectation_type"],
+            kwargs=e["kwargs"],
+            meta={**e.get("meta", {}), "dq_contract": provenance},
+        )
+        for e in contract["suite"]["expectations"]
+    ]
 
 
 def summarize(checkpoint_result: Any) -> str:

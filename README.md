@@ -155,6 +155,7 @@ dq-agent/
 │   ├── dq_validation.py  # allowlist, load/validate contract, run it as an in-memory GX checkpoint
 │   ├── dags/             # example validation-only DAG
 │   └── dq_contracts/     # one contract per table: <schema>.<table>.yaml
+├── notebooks/try_contract.ipynb  # run a contract with GX 0.18.2 before it goes to data-flow
 ├── contracts/          # approved contracts the scoping agent persists land here (git-ignored)
 ├── proposals/          # creative-mode proposals to allow more GX expectations — reviewed, never executed
 ├── data/synthetic/     # dirty-by-design test dataset (orders.csv)
@@ -203,7 +204,9 @@ Contracts never hold connection strings; the task reads the connection from the 
 
 #### The data-flow task
 
-`dataflow_kit/dags/dq_check_example.py` is a validation-only DAG. Its `@task.virtualenv` task calls `gx_get_context()` (data-flow's own `validation_utils`), `load_contract(contract_path(schema, table))` and `run_contract(...)`, which builds the suite and checkpoint in memory, runs them against the table and raises `DataQualityCheckFailed` on any failure — so Airflow marks the run failed. To validate after an ingestion pipeline instead, chain the same task after its sync (`sync_task >> check(...)`).
+`dataflow_kit/dags/dq_check_example_pipeline.py` is a validation-only DAG. Its `@task.virtualenv` task calls `gx_get_context()` (data-flow's own `validation_utils`), `load_contract(contract_path(schema, table))` and `run_contract(...)`, which builds the suite and checkpoint in memory, runs them against the table and raises `DataQualityCheckFailed` on any failure — so Airflow marks the run failed. To validate after an ingestion pipeline instead, chain the same task after its sync (`sync_task >> check(...)`).
+
+Before a contract goes to data-flow, `notebooks/try_contract.ipynb` runs it with GX 0.18.2: against the real table through the same `run_contract` (the test that counts), or against a local CSV/Parquet file as a quick smoke test. It takes an approved contract file or the draft YAML the agent shows at the approval step, applies data-flow's checks first, and stores nothing.
 
 ### The agentic layer
 
@@ -274,7 +277,7 @@ Install the optional dependency groups you need:
 | -------------------------- | ------------------------------------------------------- |
 | `uv sync`                  | core: Polars, Pydantic, PyYAML (also all the data-flow kit needs to load contracts) |
 | `uv sync --extra dev`      | pytest, pytest-cov                                      |
-| `uv sync --extra postgres` | ConnectorX (Postgres connector)                         |
+| `uv sync --extra postgres` | ConnectorX (Postgres connector), SQLAlchemy + psycopg2 (the notebook's Postgres run) |
 | `uv sync --extra agents`   | LangGraph + LangChain + SQLite checkpointer + Great Expectations 0.18.2 (the scoping agent, CLI driver and contract validation) |
 
 Run the suite:

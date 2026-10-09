@@ -16,6 +16,7 @@ uv run pytest --cov=src/dq_agent                      # run with coverage
 
 uv run python scripts/scoping_cli.py                  # drive the scoping agent from the terminal
 uv run python scripts/scoping_cli.py --db scoping.sqlite   # ...with a durable, resumable thread
+uv run jupyter lab notebooks/try_contract.ipynb      # run a contract with GX 0.18.2 (file or Postgres)
 ```
 
 ## Architecture
@@ -39,6 +40,7 @@ src/dq_agent/
   connectors.py      ← adapters that load data into Polars DataFrames (CSV/Parquet, Postgres)
   agents/            ← LangGraph scoping agent; wraps profiler and registry as tools, human
                        approval gate as an interrupt(), persists approved contract YAML
+notebooks/           ← try_contract.ipynb: run a contract with GX before it goes to data-flow
 contracts/           ← approved contracts the agent persists (<schema>.<table>.yaml, git-ignored)
 proposals/           ← creative mode: proposals to allow an unlisted GX expectation (proposals.py),
                        awaiting developer review, never executed
