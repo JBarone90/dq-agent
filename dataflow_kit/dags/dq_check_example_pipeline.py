@@ -4,6 +4,7 @@ It runs no ingestion. It loads `dq_contracts/<schema>.<table>.yaml` and validate
 
 Before using it at work:
 - set SCHEMA / TABLE to the pilot table (its contract must exist in dq_contracts/);
+- the file name must end in `_pipeline.py` for Airflow to notice it;
 - adjust the `dataflow.dq_validation` import to wherever dq_validation.py is placed;
 - `schedule=None` means manual trigger only; on Airflow < 2.4 the argument is `schedule_interval`.
 
@@ -25,6 +26,7 @@ DAG_ID = f"dq_check__{SCHEMA}__{TABLE}"
         "sqlalchemy==1.4.40",
         "great-expectations==0.18.2",
     ],
+    retries=5,
     system_site_packages=True,
 )
 def check(schema, table, dag_id, run_id):
