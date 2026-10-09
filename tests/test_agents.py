@@ -18,7 +18,7 @@ from dq_agent.agents import bedrock_chat
 from dq_agent.agents.bedrock_chat import DeptBedrockChat
 from dq_agent.agents.scoping import ProposedExpectation, _make_tools, build_graph
 from dq_agent.connectors import ProfilingLoad
-from dataflow_kit.dq_validation import load_contract
+from dataflow_kit.operators.dq_validation import load_contract
 from dq_agent.models import Contract
 
 

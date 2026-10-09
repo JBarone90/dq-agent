@@ -83,12 +83,12 @@ uv sync --extra agents --extra dev
 uv run python scripts/scoping_cli.py
 ```
 
-The repo ships a dirty-by-design dataset (`data/synthetic/orders.csv` — 20 order rows with known issues: null customer ids, a duplicate order id, a negative amount, a malformed email, an unexpected status, a stale date) and the contract that covers it (`dataflow_kit/dq_contracts/synthetic.orders.yaml`). Loading and validating a contract is what the data-flow task does first:
+The repo ships a dirty-by-design dataset (`data/synthetic/orders.csv` — 20 order rows with known issues: null customer ids, a duplicate order id, a negative amount, a malformed email, an unexpected status, a stale date) and the contract that covers it (`dataflow_kit/contracts/synthetic.orders.yaml`). Loading and validating a contract is what the data-flow task does first:
 
 ```python
-from dataflow_kit.dq_validation import load_contract
+from dataflow_kit.operators.dq_validation import load_contract
 
-contract = load_contract("dataflow_kit/dq_contracts/synthetic.orders.yaml")  # raises ContractError if invalid
+contract = load_contract("dataflow_kit/contracts/synthetic.orders.yaml")  # raises ContractError if invalid
 ```
 
 Running it needs Great Expectations 0.18.2 and a Postgres table, so it happens in data-flow — see [The run side](#the-run-side).
@@ -96,7 +96,7 @@ Running it needs Great Expectations 0.18.2 and a Postgres table, so it happens i
 
 ## The scoping agent
 
-Phase 3 wraps the scoping workflow in a single LangGraph agent (`src/dq_agent/agents/scoping.py`). It converses with the dataset owner, profiles the dataset (`profile_dataset` — redacted report only, no raw cell values ever reach the LLM), browses the expectation catalogue (`list_rules`), and proposes a draft contract (`propose_contract`, validated against the same allowlist data-flow uses). Approval is a LangGraph `interrupt()`: the graph pauses and presents a plain-English summary of the proposed checks (`report.describe_contract`) alongside the full YAML; a human approves / edits / rejects, and only an approved contract is stamped (`approval.approved_at`, `approval.approved_by`) and persisted to `contracts/<schema>.<table>.yaml`, ready to commit to data-flow's `dq_contracts/` folder.
+Phase 3 wraps the scoping workflow in a single LangGraph agent (`src/dq_agent/agents/scoping.py`). It converses with the dataset owner, profiles the dataset (`profile_dataset` — redacted report only, no raw cell values ever reach the LLM), browses the expectation catalogue (`list_rules`), and proposes a draft contract (`propose_contract`, validated against the same allowlist data-flow uses). Approval is a LangGraph `interrupt()`: the graph pauses and presents a plain-English summary of the proposed checks (`report.describe_contract`) alongside the full YAML; a human approves / edits / rejects, and only an approved contract is stamped (`approval.approved_at`, `approval.approved_by`) and persisted to `contracts/<schema>.<table>.yaml`, ready to commit to the team folder's `contracts/` in data-flow.
 
 data-flow enforces the gate at run time: its loader rejects a contract without an `approval` block.
 
@@ -151,10 +151,10 @@ dq-agent/
 │   ├── harness.py      # scores a proposed contract vs the checks it should contain (recall)
 │   └── agents/         # LangGraph scoping agent + human approval gate (Phase 3)
 ├── registry/expectations.yaml  # our notes per allowed expectation (tags, summary, caveats)
-├── dataflow_kit/       # staged for the data-flow repo
-│   ├── dq_validation.py  # allowlist, load/validate contract, run it as an in-memory GX checkpoint
-│   ├── dags/             # example validation-only DAG
-│   └── dq_contracts/     # one contract per table: <schema>.<table>.yaml
+├── dataflow_kit/       # mirrors a data-flow team folder (dags/<team>/), copied over at work
+│   ├── dq_check_example_pipeline.py  # example validation-only DAG
+│   ├── operators/dq_validation.py    # allowlist, load/validate contract, run it as an in-memory GX checkpoint
+│   └── contracts/        # one contract per table: <schema>.<table>.yaml
 ├── notebooks/try_contract.ipynb  # run a contract with GX 0.18.2 before it goes to data-flow
 ├── contracts/          # approved contracts the scoping agent persists land here (git-ignored)
 ├── proposals/          # creative-mode proposals to allow more GX expectations — reviewed, never executed
@@ -177,7 +177,7 @@ The toolkit is two layers. The **run side** executes checks with no LLM involved
 
 #### Allowlist and registry
 
-**Which expectations and kwargs a contract may use.** `dataflow_kit/dq_validation.py` is the enforcement point, and it leans on GX itself: `ALLOWED_EXPECTATIONS` lists the permitted expectation names; the kwargs each one may take are GX's own domain and success keys minus a few forbidden ones (`row_condition`, `result_format`, …); GX's `validate_configuration` checks the values; and a handful of policy rules cover what GX lets through (unknown kwargs, an empty `value_set`, a missing `regex`, a range with no bound, any `$PARAMETER` other than the freshness form). A contract therefore cannot smuggle in arbitrary classes, actions or code.
+**Which expectations and kwargs a contract may use.** `dataflow_kit/operators/dq_validation.py` is the enforcement point, and it leans on GX itself: `ALLOWED_EXPECTATIONS` lists the permitted expectation names; the kwargs each one may take are GX's own domain and success keys minus a few forbidden ones (`row_condition`, `result_format`, …); GX's `validate_configuration` checks the values; and a handful of policy rules cover what GX lets through (unknown kwargs, an empty `value_set`, a missing `regex`, a range with no bound, any `$PARAMETER` other than the freshness form). A contract therefore cannot smuggle in arbitrary classes, actions or code.
 
 The agent's catalogue is built from the same source at startup: for each allowed name, `registry.py` reads the expectation's docstring (description and per-kwarg documentation), its kwargs and defaults from GX. `registry/expectations.yaml` adds only what GX cannot know: tags, a plain-English `summary` for the approval gate, and usage notes such as "regex is evaluated by Postgres, not Python".
 
@@ -204,7 +204,7 @@ Contracts never hold connection strings; the task reads the connection from the 
 
 #### The data-flow task
 
-`dataflow_kit/dags/dq_check_example_pipeline.py` is a validation-only DAG. Its `@task.virtualenv` task calls `gx_get_context()` (data-flow's own `validation_utils`), `load_contract(contract_path(schema, table))` and `run_contract(...)`, which builds the suite and checkpoint in memory, runs them against the table and raises `DataQualityCheckFailed` on any failure — so Airflow marks the run failed. To validate after an ingestion pipeline instead, chain the same task after its sync (`sync_task >> check(...)`).
+`dataflow_kit/dq_check_example_pipeline.py` is a validation-only DAG. Its `@task.virtualenv` task calls `gx_get_context()` (data-flow's own `validation_utils`), `load_contract(contract_path(schema, table))` and `run_contract(...)`, which builds the suite and checkpoint in memory, runs them against the table and raises `DataQualityCheckFailed` on any failure — so Airflow marks the run failed. To validate after an ingestion pipeline instead, chain the same task after its sync (`sync_task >> check(...)`).
 
 Before a contract goes to data-flow, `notebooks/try_contract.ipynb` runs it with GX 0.18.2: against the real table through the same `run_contract` (the test that counts), or against a local CSV/Parquet file as a quick smoke test. It takes an approved contract file or the draft YAML the agent shows at the approval step, applies data-flow's checks first, and stores nothing.
 
@@ -306,7 +306,7 @@ docker rm -f dq-test-pg
 
 ### Adding an expectation
 
-1. Add its name to `ALLOWED_EXPECTATIONS` in `dataflow_kit/dq_validation.py` (with any kwarg our policy requires beyond GX, e.g. `regex`). Its kwargs, types and documentation come from GX automatically.
+1. Add its name to `ALLOWED_EXPECTATIONS` in `dataflow_kit/operators/dq_validation.py` (with any kwarg our policy requires beyond GX, e.g. `regex`). Its kwargs, types and documentation come from GX automatically.
 2. Optionally add an entry to `registry/expectations.yaml` — without one the agent still sees GX's description, and the approval gate shows the raw name and kwargs:
 
 ```yaml

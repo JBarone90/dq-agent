@@ -1,6 +1,6 @@
 """The contract: the scoping agent's only product, and what data-flow runs.
 
-A contract is a Great Expectations 0.18.2 suite in a small envelope (see `dataflow_kit/dq_validation.py`, which validates and runs it in Airflow). Expectation names and kwargs are GX-native. `approval` is stamped by the human approval gate; data-flow refuses a contract without it. Contracts are stored one per table as `<schema>.<table>.yaml`.
+A contract is a Great Expectations 0.18.2 suite in a small envelope (see `dataflow_kit/operators/dq_validation.py`, which validates and runs it in Airflow). Expectation names and kwargs are GX-native. `approval` is stamped by the human approval gate; data-flow refuses a contract without it. Contracts are stored one per table as `<schema>.<table>.yaml`.
 
 Validity is defined in one place: `problems()` delegates to the data-flow allowlist, so whatever the agent saves is exactly what data-flow will accept.
 """
@@ -14,7 +14,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
-from dataflow_kit import dq_validation
+from dataflow_kit.operators import dq_validation
 
 
 class _Strict(BaseModel):

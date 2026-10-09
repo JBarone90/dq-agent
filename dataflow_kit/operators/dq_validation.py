@@ -1,10 +1,10 @@
 """Run an approved data quality contract with Great Expectations 0.18.2.
 
-Staged in dq-agent, copied into the `data-flow` repo at work. Three pieces make up a data quality check there, and only the third changes per table:
+Staged in dq-agent, copied into a team folder of the `data-flow` repo at work (`dags/<team>/`). Three pieces make up a data quality check there, and only the third changes per table:
 
-- this module: loads a contract YAML, validates it, and runs it as an in-memory Expectation Suite + Checkpoint;
-- the validation DAG (`dags/dq_check_example_pipeline.py`): calls this module from a `@task.virtualenv` task;
-- the contract: `dq_contracts/<schema>.<table>.yaml`, produced by the dq-agent scoping agent and approved by the dataset owner.
+- this module, `operators/dq_validation.py`: loads a contract YAML, validates it, and runs it as an in-memory Expectation Suite + Checkpoint;
+- the validation DAG, `dq_check_<table>_pipeline.py`: calls this module from a `@task.virtualenv` task;
+- the contract, `contracts/<schema>.<table>.yaml`: produced by the dq-agent scoping agent and approved by the dataset owner.
 
 The contract uses GX expectation names and kwargs directly — there is no translation layer. What a contract may contain is decided here, mostly by GX itself:
 
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 CONTRACT_VERSION = 1
 GX_VERSION = "0.18.2"
-CONTRACTS_DIR = Path(__file__).parent / "dq_contracts"
+CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"  # dags/<team>/contracts/
 
 # Expectations a contract may use -> kwargs we require on top of what GX requires.
 ALLOWED_EXPECTATIONS: dict[str, frozenset[str]] = {

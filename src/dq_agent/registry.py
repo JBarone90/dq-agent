@@ -1,6 +1,6 @@
 """The scoping agent's catalogue of expectations, built from Great Expectations at startup.
 
-Nothing about what a contract may contain is written here. For each expectation in the data-flow allowlist (`dataflow_kit.dq_validation.ALLOWED_EXPECTATIONS`), the registry asks GX 0.18.2 for:
+Nothing about what a contract may contain is written here. For each expectation in the data-flow allowlist (`dataflow_kit.operators.dq_validation.ALLOWED_EXPECTATIONS`), the registry asks GX 0.18.2 for:
 
 - the expectation's one-line description (first line of its docstring);
 - the kwargs a contract may pass (`dq_validation.allowed_kwargs`: GX's domain and success keys minus the forbidden ones);
@@ -18,7 +18,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel
 
-from dataflow_kit import dq_validation
+from dataflow_kit.operators import dq_validation
 
 _DOC_SECTIONS = ("Args:", "Keyword Args:")
 _DOC_HEADER = re.compile(r"^[A-Z][A-Za-z ]*:$")

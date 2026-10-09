@@ -1,6 +1,6 @@
 import pytest
 
-from dataflow_kit.dq_validation import ALLOWED_EXPECTATIONS, FORBIDDEN_KWARGS
+from dataflow_kit.operators.dq_validation import ALLOWED_EXPECTATIONS, FORBIDDEN_KWARGS
 from dq_agent.registry import Registry, RuleDefinition
 
 

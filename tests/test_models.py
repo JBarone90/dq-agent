@@ -3,10 +3,10 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from dataflow_kit.dq_validation import validate_contract
+from dataflow_kit.operators.dq_validation import validate_contract
 from dq_agent.models import Contract, Expectation
 
-EXAMPLE = Path(__file__).parent.parent / "dataflow_kit" / "dq_contracts" / "synthetic.orders.yaml"
+EXAMPLE = Path(__file__).parent.parent / "dataflow_kit" / "contracts" / "synthetic.orders.yaml"
 
 
 def _draft(*expectations: Expectation) -> Contract:

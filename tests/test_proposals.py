@@ -3,7 +3,7 @@
 import pytest
 import yaml
 
-from dataflow_kit.dq_validation import ALLOWED_EXPECTATIONS
+from dataflow_kit.operators.dq_validation import ALLOWED_EXPECTATIONS
 from dq_agent import proposals
 
 LENGTHS = "expect_column_value_lengths_to_be_between"

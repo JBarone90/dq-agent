@@ -15,7 +15,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel
 
-from dataflow_kit import dq_validation
+from dataflow_kit.operators import dq_validation
 
 DEFAULT_PROPOSALS_DIR = Path("proposals")
 

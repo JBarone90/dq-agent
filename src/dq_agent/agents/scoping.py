@@ -33,7 +33,7 @@ from langgraph.prebuilt import InjectedState, ToolNode
 from langgraph.types import Command, interrupt
 from pydantic import field_validator
 
-from dataflow_kit import dq_validation
+from dataflow_kit.operators import dq_validation
 from dq_agent import connectors, profiler, proposals
 from dq_agent.models import Contract, Expectation
 from dq_agent.registry import Registry, RuleDefinition

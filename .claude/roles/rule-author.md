@@ -1,6 +1,6 @@
 ---
 role: rule-author
-applies_when: Editing registry/expectations.yaml, or ALLOWED_EXPECTATIONS / FORBIDDEN_KWARGS / the policy rules in dataflow_kit/dq_validation.py
+applies_when: Editing registry/expectations.yaml, or ALLOWED_EXPECTATIONS / FORBIDDEN_KWARGS / the policy rules in dataflow_kit/operators/dq_validation.py
 description: How to add or change an expectation the scoping agent may propose and data-flow may run
 ---
 

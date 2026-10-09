@@ -1,11 +1,12 @@
 """Example validation-only DAG: runs the approved data quality contract for one table.
 
-It runs no ingestion. It loads `dq_contracts/<schema>.<table>.yaml` and validates the table with Great Expectations through `dq_validation.run_contract`. A failed expectation raises, so Airflow marks the run failed.
+It runs no ingestion. It loads `contracts/<schema>.<table>.yaml` and validates the table with Great Expectations through `dq_validation.run_contract`. A failed expectation raises, so Airflow marks the run failed.
 
 Before using it at work:
-- set SCHEMA / TABLE to the pilot table (its contract must exist in dq_contracts/);
+- copy it into the team folder as `dags/<team>/dq_check_<table>_pipeline.py`, next to `operators/` and `contracts/`;
+- set SCHEMA / TABLE to the pilot table (its contract must exist in contracts/);
 - the file name must end in `_pipeline.py` for Airflow to notice it;
-- adjust the `dataflow.dq_validation` import to wherever dq_validation.py is placed;
+- point the `dq_validation` import at the team's operators, the way the team's other DAGs import theirs;
 - `schedule=None` means manual trigger only; on Airflow < 2.4 the argument is `schedule_interval`.
 
 To validate after an existing pipeline instead, chain the same task after its sync: `sync_task >> check(...)`.
@@ -33,7 +34,7 @@ def check(schema, table, dag_id, run_id):
     # Runs in a fresh virtualenv: every import must live inside the function.
     import os
 
-    from dataflow.dq_validation import load_table_contract, run_contract
+    from dags.my_team.operators.dq_validation import load_table_contract, run_contract  # TODO: team folder
     from dataflow.validation_utils import gx_get_context
 
     contract = load_table_contract(schema, table)
