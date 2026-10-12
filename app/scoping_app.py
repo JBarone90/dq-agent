@@ -9,9 +9,8 @@ matter here, plus a few extras:
   - **visible tool calls** with a sidebar **toggle** to show/hide them;
   - **profile-at-a-glance** — the `profile_dataset` result renders as a stats table,
     not raw JSON;
-  - the human approval gate as approve / edit / reject controls, with a **rule
-    provenance** view (each proposed rule next to the profile signal behind it) and
-    **edit** exposing the contract YAML before approval;
+  - the human approval gate as approve / edit / reject controls, with **edit**
+    exposing the contract YAML before approval;
   - **resumable threads** — conversations persist in a local SQLite checkpoint store,
     so a closed tab can be reopened and continued;
   - **token-usage**, a dev **session-cost** readout (per-call `x-cost` headers), the
@@ -316,32 +315,6 @@ def _render_transcript(result: dict[str, Any] | None, show_tools: bool) -> None:
 # --- approval gate -------------------------------------------------------
 
 
-def _provenance_rows(draft: dict[str, Any], profile: dict[str, Any] | None) -> list[dict]:
-    """Each proposed rule next to the profile signal behind it, so the owner sees
-    *why* a rule was chosen before approving."""
-    cols = {c["name"]: c for c in (profile or {}).get("columns", [])}
-    rows = []
-    for rule in draft.get("rules", []):
-        column = (rule.get("params") or {}).get("column")
-        signal = ""
-        if column and column in cols:
-            col = cols[column]
-            bits = []
-            if col.get("null_rate"):
-                bits.append(f"{col['null_rate'] * 100:.0f}% null")
-            if col.get("uniqueness_ratio") is not None:
-                bits.append(f"uniq {col['uniqueness_ratio']:.2f}")
-            if col.get("semantic_hint"):
-                bits.append(f"hint: {col['semantic_hint']}")
-            signal = ", ".join(bits)
-        rows.append({
-            "rule": rule.get("rule_id", "?"),
-            "column": column or "(table)",
-            "profile signal": signal or "—",
-        })
-    return rows
-
-
 def _agent_tokens(graph: Any, graph_input: Any) -> Any:
     """Yield assistant text as the graph produces it, for `st.write_stream`.
 
@@ -394,7 +367,7 @@ def _draft_yaml(draft: dict[str, Any]) -> str:
         return yaml.safe_dump(draft, sort_keys=False)
 
 
-def _render_gate(payload: dict[str, Any], profile: dict[str, Any] | None) -> None:
+def _render_gate(payload: dict[str, Any]) -> None:
     request = (payload.get("action_requests") or [{}])[0]
     draft = request.get("args", {}).get("contract", {})
 
@@ -402,20 +375,21 @@ def _render_gate(payload: dict[str, Any], profile: dict[str, Any] | None) -> Non
     st.subheader("Approval requested")
     _markdown(request.get("description", "(no description)"))
 
-    with st.expander("🔎 Why these rules? (profile signals)"):
-        st.dataframe(
-            _provenance_rows(draft, profile), use_container_width=True, hide_index=True
-        )
-
     approve_col, reject_col = st.columns(2)
     if approve_col.button("✅ Approve", type="primary", use_container_width=True):
         _resume({"type": "approve"})
     if reject_col.button("↩️ Request changes", use_container_width=True):
-        feedback = st.session_state.get("gate_feedback") or "please revise the contract"
-        _resume({"type": "reject", "message": feedback})
-    st.text_input(
-        "Changes to request (sent if you click Request changes):", key="gate_feedback"
-    )
+        st.session_state.gate_requesting_changes = True
+
+    if st.session_state.get("gate_requesting_changes"):
+        feedback = st.text_area("What should change?", key="gate_feedback")
+        send_col, cancel_col = st.columns(2)
+        if send_col.button("Send", type="primary", use_container_width=True):
+            st.session_state.gate_requesting_changes = False
+            _resume({"type": "reject", "message": feedback or "please revise the contract"})
+        if cancel_col.button("Cancel", use_container_width=True):
+            st.session_state.gate_requesting_changes = False
+            st.rerun()
 
     with st.expander("✏️ Edit the contract directly, then approve"):
         edited_yaml = st.text_area(
@@ -590,11 +564,15 @@ def main() -> None:
 
     payload = _pending_interrupt(result)
     if payload is not None:
-        _render_gate(payload, (result or {}).get("profile"))
+        _render_gate(payload)
         return
 
     if result is None:
-        _source_entry()  # guided first-turn locator; chat below stays the escape hatch
+        # guided first-turn locator only — chat opens up once a conversation exists,
+        # so the owner can't type a stray message before choosing a source
+        _source_entry()
+        return
+
     prompt = st.chat_input("Message the scoping agent…")
     if prompt:
         _invoke({"messages": [{"role": "user", "content": prompt}]})
