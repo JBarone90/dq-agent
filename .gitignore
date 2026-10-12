@@ -47,3 +47,6 @@ data/**/*.json
 
 # Personal notes — local concept reference, not part of the codebase
 agentic_concepts.md
+
+# Forum talk slides — local presentation artifact, not part of the codebase
+docs/forum-slides.html
