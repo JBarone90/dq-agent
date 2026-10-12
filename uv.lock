@@ -713,6 +713,10 @@ dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
 ]
+notebook = [
+    { name = "ipykernel" },
+    { name = "jupyterlab" },
+]
 postgres = [
     { name = "connectorx" },
     { name = "psycopg2-binary" },
@@ -727,6 +731,8 @@ ui = [
 requires-dist = [
     { name = "connectorx", marker = "extra == 'postgres'", specifier = ">=0.3.0" },
     { name = "great-expectations", marker = "extra == 'agents'", specifier = "==0.18.2" },
+    { name = "ipykernel", marker = "extra == 'notebook'", specifier = ">=6.0" },
+    { name = "jupyterlab", marker = "extra == 'notebook'", specifier = ">=4.0" },
     { name = "langchain", marker = "extra == 'agents'", specifier = ">=0.3.0" },
     { name = "langchain-core", marker = "extra == 'agents'", specifier = ">=0.3.0" },
     { name = "langgraph", marker = "extra == 'agents'", specifier = ">=0.2.0" },
@@ -741,7 +747,7 @@ requires-dist = [
     { name = "sqlalchemy", marker = "extra == 'postgres'", specifier = ">=1.4,<2" },
     { name = "streamlit", marker = "extra == 'ui'", specifier = ">=1.40" },
 ]
-provides-extras = ["postgres", "agents", "ui", "dev"]
+provides-extras = ["postgres", "agents", "ui", "notebook", "dev"]
 
 [[package]]
 name = "entrypoints"

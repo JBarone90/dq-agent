@@ -9,6 +9,8 @@ uv sync                      # install core deps
 uv sync --extra dev          # add pytest / pytest-cov
 uv sync --extra postgres     # add ConnectorX for Postgres connector
 uv sync --extra agents       # add LangGraph + LangChain
+uv sync --extra notebook     # add JupyterLab + ipykernel, then once:
+uv run python -m ipykernel install --user --name dq-agent --display-name "Python (dq-agent)"
 
 uv run pytest                # run all tests
 uv run pytest tests/path/to/test_file.py::test_name   # run a single test
