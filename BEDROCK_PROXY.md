@@ -1,6 +1,6 @@
 # Bedrock proxy reference
 
-How the internal `dwutils.bedrock` proxy actually behaves, including the parts its docstrings do not cover. Everything here was verified against the live proxy with `scripts/explore_bedrock.py` on 2026-09-14; re-run that script after any proxy upgrade, because several of these facts changed once already and broke the pipeline silently.
+How the internal `dwutils.bedrock` proxy actually behaves, including the parts its docstrings do not cover. Everything here was verified against the live proxy on 2026-09-14 with a probe script (`scripts/explore_bedrock.py`, since removed; it is in git history). Re-check these facts after any proxy upgrade, because several of them changed once already and broke the pipeline silently.
 
 ## Calling convention
 
@@ -74,7 +74,7 @@ Economics: a token pays for itself once it has been re-sent three times. Nothing
 
 `invoke(..., stream=True)` returns an iterator of raw Converse events. Two consequences worth knowing:
 
-**No usage headers at all.** HTTP headers are sent before the first token exists, so the proxy cannot stamp `x-cost` or `x-tokens-used` on a stream. Token counts arrive in the closing `metadata` event instead, and cost is worked out locally from `get_model_info` pricing (`_computed_cost`). That is still the proxy's pricing, not a table baked into this repo - it is the same source `x-cost` is derived from.
+**No usage headers at all.** HTTP headers are sent before the first token exists, so the proxy cannot stamp `x-cost` or `x-tokens-used` on a stream. Token counts arrive in the closing `metadata` event instead. The adapter does not track cost: it reports token counts only (`usage_metadata`, cache reads and writes included), streamed or not.
 
 **Failures can start after the iterator is handed back.** The proxy reports a mid-stream failure as an error event, which dwutils raises while iterating, long after the status code is gone. `_stream` translates those too, so a driver's `except BedrockProxyError` covers streamed turns.
 
@@ -94,10 +94,10 @@ Missing `BEDROCK_PROXY_URL` / `BEDROCK_TOKEN` raises a plain `ValueError`, not a
 
 ## Unrelated noise
 
-Proxy calls in the work environment print `ignoring unparsable config .../pyproject.toml`, twice. Our `pyproject.toml` parses cleanly under `tomllib` on 3.11+, so this is some other tool in that environment reading it with an older or stricter parser. Harmless, but it is not coming from this project.
+Proxy calls in the work environment print `ignoring unparsable config .../pyproject.toml`, twice. Our `pyproject.toml` parses cleanly under `tomllib` on 3.11+ (the project now needs 3.13), so this is some other tool in that environment reading it with an older or stricter parser. Harmless, but it is not coming from this project.
 
 ## Re-verifying
 
-`uv run python scripts/explore_bedrock.py` - steps 0-2 check reachability and a plain call, 3 proves tool calling still works, 4-5 drive the adapter end to end, 6 reports the static prefix against the cache minimum, 7 proves caching round-trips, 8 proves the TTL is honoured by reading it off the bill rather than trusting a 200.
+The removed probe script (`git show 783cf0d:scripts/explore_bedrock.py`) - steps 0-2 check reachability and a plain call, 3 proves tool calling still works, 4-5 drive the adapter end to end, 6 reports the static prefix against the cache minimum, 7 proves caching round-trips, 8 proves the TTL is honoured by reading it off the bill rather than trusting a 200.
 
 Steps 3 and 7 are go/no-go and exit non-zero. Steps 6 and 8 are informational and never block the run.

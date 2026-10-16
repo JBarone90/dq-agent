@@ -5,21 +5,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-uv sync                      # install core deps
-uv sync --extra dev          # add pytest / pytest-cov
-uv sync --extra postgres     # add ConnectorX for Postgres connector
-uv sync --extra agents       # add LangGraph + LangChain
-uv sync --extra notebook     # add JupyterLab + ipykernel, then once:
-uv run python -m ipykernel install --user --name dq-agent --display-name "Python (dq-agent)"
+uv sync                      # core deps (incl. the internal dwutils) + the dev group (pytest, ruff, mypy, ipykernel)
+uv sync --extra postgres     # add ConnectorX, psycopg, SQLAlchemy 1.4 for the Postgres connector
+uv sync --extra agents       # add LangGraph + LangChain + Great Expectations 0.18.2
+uv sync --extra ui           # add Streamlit for app/scoping_app.py
+uv run python -m ipykernel install --user --name dq-agent --display-name "Python (dq-agent)"   # once
 
-uv run pytest                # run all tests
+uv run pytest                # run all tests (postgres / integration ones skip without their env)
+uv run pytest -m "not postgres and not integration"   # the repo alone, offline
+uv run pytest tests_kit      # the kit and gx_contract agree (this checkout only: no kit at work)
 uv run pytest tests/path/to/test_file.py::test_name   # run a single test
 uv run pytest --cov=src/dq_agent                      # run with coverage
 
 uv run python scripts/scoping_cli.py                  # drive the scoping agent from the terminal
 uv run python scripts/scoping_cli.py --db scoping.sqlite   # ...with a durable, resumable thread
-uv run jupyter lab notebooks/try_contract.ipynb      # run a contract with GX 0.18.2 (file or Postgres)
+# notebooks/engine_gx_run.ipynb (dq-agent kernel): run a contract with GX 0.18.2 (file or Postgres)
 ```
+
+`pyproject.toml` and `uv.lock` are the work environment's: Python 3.13, the internal package mirrors, and `dwutils` as a core dependency. Outside work, `dwutils` and the first mirror return 403, so sync once with `uv sync --all-extras --no-install-package dwutils --index-strategy unsafe-best-match` and then run with `uv run --no-sync ...`. Do not edit the two files to make them install outside work; nothing in the tests imports `dwutils`.
 
 ## Architecture
 
@@ -35,24 +38,35 @@ dataflow_kit/        ← mirrors a data-flow team folder (dags/<team>/), copied 
                                  as an in-memory GX suite + checkpoint, raise on failure
   contracts/         ← one contract per table: <schema>.<table>.yaml
 src/dq_agent/
+  gx_contract.py     ← dq-agent's copy of the kit's rules (allowlist, policy, severity, run helpers);
+                       must not import the kit or the rest of dq_agent; tests_kit/test_kit_parity.py holds it to the kit
   registry.py        ← builds the agent's catalogue from GX metadata + registry/expectations.yaml
-  models.py          ← Contract: the GX envelope; problems() delegates to the data-flow allowlist
+  models.py          ← Contract: the GX envelope, with per-expectation severity; problems() delegates to gx_contract
   profiler.py        ← produces a structured JSON report (col stats, table stats, semantic hints);
                        redact() strips raw cell values before any report reaches an LLM
   connectors.py      ← adapters that load data into Polars DataFrames (CSV/Parquet, Postgres)
   agents/            ← LangGraph scoping agent; wraps profiler and registry as tools, human
-                       approval gate as an interrupt(), persists approved contract YAML
-notebooks/           ← try_contract.ipynb: run a contract with GX before it goes to data-flow
+                       approval gate as an interrupt(), persists approved contract YAML;
+                       gate.py is the interrupt/resume protocol both drivers use
+app/scoping_app.py   ← Streamlit driver (same graph + checkpointer pattern as the CLI)
+notebooks/           ← engine_gx_run.ipynb: run a contract with GX before it goes to data-flow
 contracts/           ← approved contracts the agent persists (<schema>.<table>.yaml, git-ignored)
 proposals/           ← creative mode: proposals to allow an unlisted GX expectation (proposals.py),
                        awaiting developer review, never executed
 data/synthetic/      ← dirty-by-design test dataset (committed); all other data excluded by .gitignore
 ```
 
+### Two components, one repo
+
+This repo is primarily **dq-agent** (the scoping side). `dataflow_kit/` is a copy of a **separate but connected component** that lives in the data-flow Airflow repo and is copied there by hand. The two meet only at the contract format and the rules that judge it. Whenever you change one, say what it means for the other: the contract shape, the allowlist and policy, severity semantics, the example contract, and which files have to be copied to data-flow. Kit-side changes are kept to what the agent side genuinely needs.
+
 ### Key design invariants
 
+- **`tests/` runs at work, offline and without the kit.** The work repo has no `dataflow_kit/` and no internet. Nothing under `tests/` may import or mention the kit: tests target dq-agent's own code (`gx_contract`, `contracts/examples/`); the kit comparison lives in `tests_kit/`, run only in this checkout. Nothing may reach the network: `tests/conftest.py` switches off GX's usage statistics. Tests needing an optional extra skip without it; `postgres` tests (`DQ_TEST_POSTGRES_URI`) and `integration` tests (the Bedrock proxy) skip without their environment.
+
 - **Polars is the profiling representation.** Connectors load into a Polars DataFrame before profiling. Execution is Great Expectations, inside the database, in data-flow.
-- **Contracts are GX 0.18.2-native and allowlisted.** Expectation names and kwargs are used directly — no translation layer, no generated code, no `eval`. `dataflow_kit/operators/dq_validation.py` is the single definition of what is valid: `ALLOWED_EXPECTATIONS` lists the permitted names, the permitted kwargs are GX's own keys minus `FORBIDDEN_KWARGS`, values are checked by GX's `validate_configuration` plus a few policy rules. `Contract.problems()` and the agent's catalogue (`registry.py`) both derive from it, so never restate kwargs or types elsewhere. Do not upgrade the GX version silently.
+- **Contracts are GX 0.18.2-native and allowlisted.** Expectation names and kwargs are used directly — no translation layer, no generated code, no `eval`. `dataflow_kit/operators/dq_validation.py` defines what data-flow accepts: `ALLOWED_EXPECTATIONS` lists the permitted names, the permitted kwargs are GX's own keys minus `FORBIDDEN_KWARGS`, values are checked by GX's `validate_configuration` plus a few policy rules, and `meta` holds only `severity` and `notes`. dq-agent does not import the kit: `src/dq_agent/gx_contract.py` carries the same rules, and `Contract.problems()` and the agent's catalogue (`registry.py`) derive from it, so never restate kwargs or types anywhere else. **Change the kit and `gx_contract.py` together** — `tests_kit/test_kit_parity.py` fails if they differ on the allowlist, the kwargs or any contract's verdict. Do not upgrade the GX version silently.
+- **Severity decides what a failure does.** Each expectation's `meta.severity` is `error` (a failure fails the Airflow task) or `warning` (logged and recorded, the run completes). Missing means `error`, and a check that could not run is always an `error`. The owner chooses it at the approval gate; the agent only suggests.
 - **Contracts gate execution.** No check runs without an approved contract: data-flow's loader rejects a contract without an `approval` block. Contracts never contain connection strings.
 - **Keep the data-flow footprint minimal.** The kit is one utility module, one example DAG and the contracts folder, all inside the team folder. Do not add scripts or infrastructure there without asking.
 - **Proposals are never executed.** `proposals/` contains hypotheses. Promote to the allowlist only after developer review.
@@ -65,8 +79,8 @@ before starting work in the corresponding area:
 
 | When you are...                                      | Load this role file              |
 | ---------------------------------------------------- | -------------------------------- |
-| Editing `registry/expectations.yaml` or the allowlist/policy in `dataflow_kit/operators/dq_validation.py` | `.claude/roles/rule-author.md` |
-| Editing the scoping agent's approval gate / interrupt payloads, or the CLI/Streamlit driver that consumes them | `.claude/roles/hitl-driver.md` |
+| Editing `registry/expectations.yaml` or the allowlist/policy in `dataflow_kit/operators/dq_validation.py` or `src/dq_agent/gx_contract.py` | `.claude/roles/rule-author.md` |
+| Editing the scoping agent's approval gate / interrupt payloads (`scoping.py`, `agents/gate.py`), or the CLI/Streamlit driver that consumes them | `.claude/roles/hitl-driver.md` |
 
 ---
 
@@ -85,6 +99,6 @@ This branch replaces the Polars engine with GX-native contracts and the data-flo
   - **CLI:** `scripts/scoping_cli.py` (the supported path today).
   - **Visual (for non-coders):** an optional Streamlit chat panel — same in-process graph + checkpointer pattern, npm-free.
 
-**Proxy behaviour lives in `BEDROCK_PROXY.md`.** The Converse wire format, the `simple=False` calling convention, prompt caching, streaming, per-model cache minimums and pricing, and the error shapes - all verified against the live proxy rather than taken from `dwutils` docstrings, which do not cover most of it. Read it before changing `bedrock_chat.py`, and re-run `scripts/explore_bedrock.py` after any proxy upgrade: these facts have changed under us once already.
+**Proxy behaviour lives in `BEDROCK_PROXY.md`.** The Converse wire format, the `simple=False` calling convention, prompt caching, streaming, per-model cache minimums and pricing, and the error shapes - all verified against the live proxy rather than taken from `dwutils` docstrings, which do not cover most of it. Read it before changing `bedrock_chat.py`, and re-check it after any proxy upgrade: these facts have changed under us once already.
 
 **Checkpointer is mandatory for any driver.** The approval gate is a LangGraph `interrupt()`; without a checkpointer it cannot pause and resume, so the contract is never produced. On `main` the `langgraph dev` server supplied this implicitly — here each driver must pass one to `build_graph(checkpointer=...)` (`MemorySaver` for an ephemeral session, `SqliteSaver` for a resumable one). A driver loop must also distinguish a normal conversational turn (send a new message) from a pending interrupt (send `Command(resume=...)`) by checking `result.get("__interrupt__")`.

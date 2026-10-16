@@ -1,12 +1,12 @@
 ---
 role: hitl-driver
-applies_when: Editing the scoping agent's approval gate or interrupt payloads (src/dq_agent/agents/scoping.py), or the local driver that consumes them (scripts/scoping_cli.py, an optional Streamlit app)
+applies_when: Editing the scoping agent's approval gate or interrupt payloads (src/dq_agent/agents/scoping.py, src/dq_agent/agents/gate.py), or the local driver that consumes them (scripts/scoping_cli.py, app/scoping_app.py)
 description: The contract between this project's LangGraph approval gate and the local human-in-the-loop driver (interrupt schema, resume schema, markdown rendering, checkpointer requirement)
 ---
 
 # HITL Driver Role
 
-This branch (`feat/bedrock-proxy-adapter`) is air-gapped with no npm mirror, so there is no agent-chat-ui and no `langgraph dev` server. The human-in-the-loop interface is a **local, in-process driver** — the CLI in `scripts/scoping_cli.py` today, optionally a Streamlit chat panel. A driver's only coupling to the graph is three things: it must **compile the graph with a checkpointer**, it reads the **interrupt payload** the `approval` node emits, and it sends back a **resume payload**. Keep those three shapes stable and any driver keeps working.
+This branch is air-gapped with no npm mirror, so there is no agent-chat-ui and no `langgraph dev` server. The human-in-the-loop interface is a **local, in-process driver** — the CLI in `scripts/scoping_cli.py` and the Streamlit chat panel in `app/scoping_app.py`. Both go through `agents/gate.py` (`pending_interrupt`, `resume`, `decision_from_text`, and `saved_result` to reopen a saved thread at its pending gate instead of sending it a new message); a new driver should too, rather than re-implementing the shapes below. A driver's only coupling to the graph is three things: it must **compile the graph with a checkpointer**, it reads the **interrupt payload** the `approval` node emits, and it sends back a **resume payload**. Keep those three shapes stable and any driver keeps working.
 
 ## Checkpointer is mandatory — this is the #1 gotcha
 
@@ -46,7 +46,7 @@ Resume with `Command(resume={"decisions": [decision]})`. Each `decision` is one 
 - `{"type": "reject", "message"?: str}`
 - `{"type": "edit", "edited_action": {"name": str, "args": {"contract": {...}}}}` — the owner's modified contract lives in `edited_action["args"]["contract"]`.
 
-`scoping.py:_decision()` normalizes all of this — `{"decisions": [...]}`, a bare list, a bare dict, or a **free-text string** — into one decision dict. The free-text path is what lets a plain CLI accept typed input (`approve`, or any other text → reject-with-feedback) without rendering buttons. Keep that normalizer if you touch the gate.
+`gate.py:unwrap_decision()` normalizes all of this — `{"decisions": [...]}`, a bare list, a bare dict, or a **free-text string** — into one decision dict. The free-text path is what lets a plain CLI accept typed input (`approve`, or any other text → reject-with-feedback) without rendering buttons; the approve words are `gate.APPROVE_WORDS`. Keep that normalizer if you touch the gate.
 
 ## A driver loop must separate "turn" from "resume"
 
@@ -63,11 +63,13 @@ Stop when `result.get("contract_path")` is set — that is the approved-and-pers
 
 ## The description is markdown — emit markdown
 
-`describe_contract` (`report.py`) is rendered as markdown by the driver's approval view. Use `- ` list markers and fenced ` ```yaml ` blocks for YAML; a literal `•` list or raw-indented YAML collapses. Anything new added to the `description` must stay valid markdown.
+`describe_contract` (`report.py`) is rendered as markdown by the driver's approval view. Use `- ` list markers and fenced ` ```yaml ` blocks for YAML; a literal `•` list or raw-indented YAML collapses. Anything new added to the `description` must stay valid markdown. Today it carries each check's severity (`- **error**: ...`), a warning when every check is `error`, and a notice when approving would replace an existing contract file.
 
 ## Our side of the contract
 
-- `src/dq_agent/agents/scoping.py` — `_approval_node` (emits the interrupt, handles the decision), `_decision` (resume normalizer), `build_graph(checkpointer=...)`.
+- `src/dq_agent/agents/scoping.py` — `_approval_node` (emits the interrupt, handles the decision; an edit may not change the table), `build_graph(checkpointer=...)`.
+- `src/dq_agent/agents/gate.py` — the protocol helpers and `unwrap_decision` (resume normalizer).
 - `src/dq_agent/report.py` — `describe_contract` (the plain-English, markdown rule summary).
 - `scripts/scoping_cli.py` — the reference driver; mirror its turn-vs-resume handling in any new UI.
-- Tests: `tests/test_agents.py` (interrupt shape, approve/edit/reject/text-string resume) and `tests/test_report.py` (markdown list markers).
+- `app/scoping_app.py` — the Streamlit driver; streams turns, then reloads state from the checkpointer to find a pending gate.
+- Tests: `tests/test_gate.py` (every resume shape), `tests/test_agents.py` (interrupt shape, approve/edit/reject/text-string resume, replacing a contract) and `tests/test_report.py` (markdown list markers, severity).

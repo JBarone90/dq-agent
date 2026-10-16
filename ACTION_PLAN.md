@@ -1,39 +1,45 @@
 # DQ Agent — Action Plan
 
-A conversational data quality framework for anyone who owns, curates, or delivers a dataset.
-Through natural language interaction, the tool helps surface appropriate quality rules,
-produces an approved contract, and executes it deterministically — without requiring
-engineering knowledge to get started.
+dq-agent helps a person who owns a dataset, but does not write code, end up with data quality checks that run automatically in the department's pipelines. A conversation helps them write the checks; from then on the checks run with no AI involved. The product is the **approved contract**: a Great Expectations 0.18.2 suite for one Postgres table.
 
-The LLM earns its place in two places only: **scoping conversations** (interpreting business
-context that statistics alone can't capture) and **creative mode** (proposing new rules for
-patterns outside the registry). Everything else is deterministic code.
+The LLM earns its place in two places only: **scoping conversations** (interpreting business context that statistics alone can't capture) and **creative mode** (proposing that an unlisted GX expectation be allowed). Everything else is deterministic code.
 
 ---
 
 ## Architecture Overview
 
+Two components, connected only by the contract file and the rules that judge it. This repo is primarily the first; it holds a copy of the second, which lives in the data-flow repo. A change to either is checked for its effect on the other.
+
 ```text
-User
- │
- ▼
-OrchestratorAgent          ← thin, conversation-driven, routes between sub-agents
- ├── ProfilerAgent          ← deterministic core, agent wrapper optional
- └── ContractAgent          ← queries registry, proposes rule suite
- │
- ▼
-Human Approval Gate        ← user reviews and approves the rule contract
- │
- ▼
-Execution Engine           ← deterministic, no LLM, runs rules against data
- │
- ▼
-Result Schema              ← portable output (pass/fail per rule, metadata)
+dq-agent (this repo) — scoping time, once per table, human + LLM
+  profile (CSV/Parquet/Postgres) → redact → converse → propose (allowlisted GX expectations,
+  each with a severity) → human approval gate → contracts/<schema>.<table>.yaml
+        │
+        │  the contract YAML, plus the same allowlist and policy on both sides
+        ▼
+data-flow kit (dataflow_kit/, copied into data-flow) — run time, every pipeline run, no LLM
+  load + validate contract → in-memory GX suite + checkpoint on the table →
+  error failure fails the Airflow task, warning failure is logged and recorded
 ```
 
-Sub-agents have clear contracts and are independently testable. The orchestrator stays thin.
-The registry and execution engine are valuable standalone — the agent is an interface layer
-on top of them.
+- **Shared rules, two copies.** `dataflow_kit/operators/dq_validation.py` and `src/dq_agent/gx_contract.py` hold the same allowlist (16 expectations), forbidden kwargs, policy and severity rules. Neither imports the other; `tests_kit/test_kit_parity.py` fails if they disagree (run in this checkout; the work repo has no kit).
+- **Single scoping agent.** One LangGraph agent with tools (`profile_dataset`, `profile_table`, `list_rules`, `propose_contract`, `request_approval`, plus the two creative-mode tools); the approval gate is an `interrupt()`. Sub-agents were planned and not needed.
+- **Drivers.** A terminal CLI and a Streamlit app, both in-process with their own checkpointer, both through `agents/gate.py`. The model is `DeptBedrockChat` over the internal Bedrock proxy.
+
+## Current state and next steps (2026-10-16)
+
+Done: profiler and connectors, the GX-native contract and allowlist, severity, the scoping agent and gate, both drivers (with streaming and token usage), creative mode, and the kit with an example DAG. Tests run anywhere; the Postgres and live-proxy tests switch on at work (see README, Development & testing).
+
+Next:
+- [ ] Pilot in data-flow: copy the kit, run the example DAG on `synthetic.orders` and then on a real table (one passing run, one deliberately failing run), and confirm where results are stored (see "Open items for the data-flow pilot" below)
+- [ ] Run the Postgres tests at work (`DQ_TEST_POSTGRES_URI`) against the department's Postgres version. They pass on Postgres 16 (2026-10-16): Postgres regex with POSIX classes, both `$PARAMETER` date bounds on a DATE column, and the `type_list` names (SQLAlchemy's, exact case: `INTEGER`, `DOUBLE_PRECISION`, `TEXT`, `DATE`)
+- [ ] Decide whether to replace the removed evaluation harness: nothing now checks that a prompt or model change still catches the synthetic dataset's known issues, apart from the opt-in live session test
+- [ ] Decide who approves: today the approver is the person at the keyboard (`DQ_AGENT_APPROVER` or the OS user); a sign-off by someone other than the owner is not covered
+- [ ] Freshness (decided 2026-10-16): "the newest row is recent", `expect_column_max_to_be_between` with the `$PARAMETER` lower bound; `expect_column_min_to_be_between` with the same bound is the separate "no stale rows" check
+
+## History
+
+The phases below are the original build log, kept for the reasoning behind each decision. Items that mention the Polars execution engine, `RuleResult`, the run report, the `columns` snapshot or `registry/rules/` describe the design before `feat/gx-contracts` (2026-10-08), which replaced the engine with Great Expectations in data-flow; the engine survives on `feat/bedrock-proxy-adapter`.
 
 ---
 
@@ -139,14 +145,7 @@ _Single-agent first, sub-agent split only if it earns its complexity._
       in-process, supplies its own checkpointer, and handles the full converse + approval loop
       (distinguishing a normal turn from a pending `interrupt()` by checking `__interrupt__`).
       This is the air-gapped replacement for a chat server — see the 2026-06-29 design entry
-- [~] Streamlit chat panel for non-technical owners (`app/scoping_app.py`, `ui` extra):
-      same in-process graph + checkpointer pattern as the CLI, npm-free (Streamlit's frontend
-      ships in its wheel). **Scaffolded:** chat transcript, tool-call visibility with a toggle,
-      and an approve/edit/reject gate (edit exposes the contract YAML) all wired to the real
-      graph. **Pending an adapter change:** token-usage readout (needs `DeptBedrockChat` to
-      surface `usage_metadata`) and token streaming (needs a `_stream` on the adapter +
-      streaming support in the proxy). Auth, deployment, and multi-user are explicitly
-      deferred (decide with IT later)
+- [x] Streamlit chat panel for non-technical owners (`app/scoping_app.py`, `ui` extra): same in-process graph + checkpointer pattern as the CLI, npm-free. Transcript with a tool-call toggle, profile table, approve / edit / reject gate (edit exposes the contract YAML, keyed to the draft), streamed replies, token usage, resumable threads. Auth, deployment and multi-user are deferred (decide with IT later)
 
 **Exit criteria:** user points at a dataset, describes its business context, receives a proposed
 rule contract, approves it, and a YAML contract file is produced that the Phase 1 engine can
@@ -286,7 +285,7 @@ sqlite`) for a resumable one.
 - **constant:** an Airflow DAG — the pilot is a standalone validation-only DAG; integrating after a sync task (`sync >> check`) comes later;
 - **per table:** `contracts/<schema>.<table>.yaml`, produced by the scoping agent and approved by the owner.
 
-Both constant parts are staged in `dataflow_kit/` and copied into data-flow by hand; the footprint there is kept deliberately minimal (no scripts, data-flow-side tests postponed). The allowlist in `dq_validation.py` is the single definition of validity: dq-agent's `Contract.problems()` calls it. A first version also kept a hand-written per-rule catalogue in `registry/rules/` under a parity test; that duplication was removed the same day — permitted kwargs, value checks and the agent-facing descriptions are now read from GX 0.18.2 itself (`domain_keys`/`success_keys`, `validate_configuration`, docstrings), leaving only the list of allowed names, a few forbidden kwargs and policy rules, and `registry/expectations.yaml` (tags, plain-English summaries, caveats). GX 0.18.2 is therefore a dependency of the `agents` extra; it installs alongside LangChain/LangGraph and imports on Python 3.11–3.13. The approval is stamped into each expectation's `meta` at run time, because suite-level meta never reaches the stored validation result. All 8 previous rules have GX equivalents: null → `expect_column_values_to_not_be_null` (`mostly` = 1 − max null rate), unique, allowed values → `_be_in_set`, range → `_be_between`, regex → `_match_regex` (evaluated by Postgres, so Postgres regex syntax), row count → `expect_table_row_count_to_be_between`, type → `expect_column_values_to_be_in_type_list` (declared column type; text-encoded types go through regex), freshness → `expect_column_min_to_be_between` with `{"$PARAMETER": "now() - timedelta(days=N)"}` (verified to evaluate in 0.18.2). Dropped with the engine: per-rule severity (any failure fails the task), the `columns` schema-drift snapshot, and the run report (results go to the GX store and dashboard). The harness now scores proposals structurally by `(expectation_type, column)`.
+Both constant parts are staged in `dataflow_kit/` and copied into data-flow by hand; the footprint there is kept deliberately minimal (no scripts, data-flow-side tests postponed). The allowlist in `dq_validation.py` is the single definition of validity: dq-agent's `Contract.problems()` calls it. A first version also kept a hand-written per-rule catalogue in `registry/rules/` under a parity test; that duplication was removed the same day — permitted kwargs, value checks and the agent-facing descriptions are now read from GX 0.18.2 itself (`domain_keys`/`success_keys`, `validate_configuration`, docstrings), leaving only the list of allowed names, a few forbidden kwargs and policy rules, and `registry/expectations.yaml` (tags, plain-English summaries, caveats). GX 0.18.2 is therefore a dependency of the `agents` extra; it installs alongside LangChain/LangGraph and imports on Python 3.11–3.13. The approval is stamped into each expectation's `meta` at run time, because suite-level meta never reaches the stored validation result. All 8 previous rules have GX equivalents: null → `expect_column_values_to_not_be_null` (`mostly` = 1 − max null rate), unique, allowed values → `_be_in_set`, range → `_be_between`, regex → `_match_regex` (evaluated by Postgres, so Postgres regex syntax), row count → `expect_table_row_count_to_be_between`, type → `expect_column_values_to_be_in_type_list` (declared column type; text-encoded types go through regex), freshness → `expect_column_min_to_be_between` with `{"$PARAMETER": "now() - timedelta(days=N)"}` (verified to evaluate in 0.18.2; since 2026-10-16 freshness is `expect_column_max_to_be_between` with the same bound, and the min form is the stale-rows check). Dropped with the engine: per-rule severity (any failure fails the task), the `columns` schema-drift snapshot, and the run report (results go to the GX store and dashboard). The harness now scores proposals structurally by `(expectation_type, column)`.
 
 Open items for the data-flow pilot:
 - [ ] Confirm whether a manual-trigger DAG is acceptable, or whether the check should be scheduled on the table's Asset (needs the ingesting pipeline to declare it in `outlets`)
@@ -296,9 +295,13 @@ Open items for the data-flow pilot:
 - [x] From the data-flow README (2026-10-09): DAG files must end in `_pipeline.py` to be picked up (example renamed); check tasks use `retries=5`; local dev runs Python 3.12; task code is pulled from GitHub at run time, so no deployment is needed for a new DAG or module
 - [ ] Copy the kit, scope a real, well-known table with `profile_table`, run the example DAG: one passing run, one deliberately failing run
 - [ ] Verify where the validation result is persisted: the data-flow README says `dataflow.ge_validation_store`, surfaced in the 'Data Validation' sheet of the pipeline monitoring dashboard, but the table was not visible from an interactive SQL session
-- [ ] Run `notebooks/try_contract.ipynb` against a real Postgres table: its Postgres path, Postgres regex and `type_list` names are untested so far (the local-file path is verified on `orders.csv`)
-- [ ] Tests for `dq_validation.py` (malformed contracts, allowlist rejections, pass/fail against a table)
-- [ ] Schema drift: add `expect_table_columns_to_match_set` to the allowlist to replace the dropped `columns` snapshot
+- [ ] Run `notebooks/engine_gx_run.ipynb` against a real Postgres table: its Postgres path, Postgres regex and `type_list` names are untested so far (the local-file path is verified on `orders.csv`)
+- [x] Tests for `dq_validation.py` (2026-10-16): `tests/test_gx_contract.py` pins the verdict on every contract in its corpus and runs contracts with GX on pandas and SQLite; `tests_kit/test_kit_parity.py` replays it against the kit; `tests/test_postgres.py` runs contracts on a real Postgres
+- [x] Schema drift (2026-10-15): `expect_table_columns_to_match_set` is in the allowlist, replacing the dropped `columns` snapshot
+
+**Severity and the extended allowlist (2026-10-15/16).** Per-rule severity is back, in GX form: each expectation's `meta.severity` is `error` (fails the task) or `warning` (logged and recorded, the run completes); missing means `error`, and a check that could not run is always an `error`. The owner chooses it at the approval gate. The allowlist grew to 16 Postgres-safe expectations (max-between, not-in-set, not-match-regex, value lengths, column pair A > B, compound unique, unique within record, columns match set), with policy rules for their multi-column kwargs. dq-agent stopped importing the kit: `src/dq_agent/gx_contract.py` carries the same rules for the agent, and `tests/test_gx_contract.py` holds the two to the same allowlist and the same verdict on every contract it tries, so both change together.
+
+**Removed at work (2026-10-16).** The evaluation harness (`harness.py` and its live-LLM integration tests) and `scripts/explore_bedrock.py` were deleted; `BEDROCK_PROXY.md` keeps what the probe established. The notebook is now `engine_gx_run.ipynb` and runs on `gx_contract`. The project moved to Python 3.13 with the work package mirrors, and `dwutils` became a core dependency.
 ---
 
 ## Tech Stack (Initial)
