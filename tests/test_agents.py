@@ -7,6 +7,7 @@ import json
 import pytest
 
 pytest.importorskip("langgraph")
+pytest.importorskip("great_expectations")
 
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage
@@ -16,9 +17,11 @@ from langgraph.types import Command
 import dq_agent.connectors as connectors
 from dq_agent.agents import bedrock_chat
 from dq_agent.agents.bedrock_chat import DeptBedrockChat
+from dq_agent.agents.gate import pending_interrupt, saved_result
 from dq_agent.agents.scoping import ProposedExpectation, _make_tools, build_graph
 from dq_agent.connectors import ProfilingLoad
-from dataflow_kit.operators.dq_validation import load_contract
+# the loader data-flow applies, in dq-agent's copy of its rules: what the agent saves must load there
+from dq_agent.gx_contract import load_contract
 from dq_agent.models import Contract
 
 
@@ -59,6 +62,26 @@ def test_profile_dataset_missing_file_errors(tools):
         _tool_call("profile_dataset", {"path": "nope/missing.csv"})
     )
     assert "error" in command.update["messages"][0].content
+    assert "profile" not in command.update
+
+
+def test_profile_dataset_refuses_files_outside_the_data_dir(registry, synthetic_data_path, tmp_path):
+    """The path comes from the LLM, so only the data directory can be read."""
+    outside = tmp_path / "secrets.csv"
+    outside.write_text("a\n1\n")
+    tools = {t.name: t for t in _make_tools(registry, data_dir=synthetic_data_path)}
+    command = tools["profile_dataset"].invoke(_tool_call("profile_dataset", {"path": str(outside)}))
+    assert "only files under the data directory" in command.update["messages"][0].content
+    assert "profile" not in command.update
+
+
+def test_profile_dataset_reports_an_unreadable_file_as_a_tool_error(registry, tmp_path):
+    (tmp_path / "broken.parquet").write_bytes(b"not parquet")
+    tools = {t.name: t for t in _make_tools(registry, data_dir=tmp_path)}
+    command = tools["profile_dataset"].invoke(
+        _tool_call("profile_dataset", {"path": str(tmp_path / "broken.parquet")})
+    )
+    assert "could not read" in command.update["messages"][0].content
     assert "profile" not in command.update
 
 
@@ -112,6 +135,22 @@ def test_propose_contract_records_unapproved_draft(tools, synthetic_data_path):
     assert draft.approval is None
     assert draft.dataset.name == "synthetic.orders"
     assert draft.suite.expectations[0].meta.notes.content == "every order has an id"
+
+
+def test_propose_contract_keeps_severity(tools, synthetic_data_path):
+    profiled = tools["profile_dataset"].invoke(
+        _tool_call("profile_dataset", {"path": str(synthetic_data_path / "orders.csv")})
+    )
+    command = tools["propose_contract"].invoke(_tool_call(
+        "propose_contract",
+        {"expectations": [{
+            "expectation_type": "expect_column_values_to_be_between",
+            "kwargs": {"column": "amount", "min_value": 0},
+            "meta": {"severity": "warning"},
+        }], "table": "synthetic.orders", "state": {"profile": profiled.update["profile"]}},
+    ))
+    draft = Contract.model_validate(command.update["draft"])
+    assert draft.suite.expectations[0].severity == "warning"
 
 
 def test_propose_contract_from_file_needs_target_table(tools, synthetic_data_path):
@@ -216,6 +255,48 @@ def test_propose_contract_confirms_bounds_when_sampled(tools, orders_df, monkeyp
     assert "99999" in content  # the real max, above the proposed max_value
 
 
+def _propose_on_sampled_table(tools, orders_df, monkeypatch, expectation, spy):
+    _mock_pg(monkeypatch, orders_df, sampled=True, estimated_rows=5_000_000,
+             bounds=(-200, 99999), bounds_spy=spy)
+    profiled = tools["profile_table"].invoke(_tool_call("profile_table", {"table": "public.orders"}))
+    command = tools["propose_contract"].invoke(_tool_call(
+        "propose_contract",
+        {"expectations": [expectation],
+         "state": {"profile": profiled.update["profile"], "source_table": "public.orders"}},
+    ))
+    return command.update["messages"][0].content
+
+
+def test_propose_contract_confirms_a_max_bound_against_the_real_max(tools, orders_df, monkeypatch):
+    spy = []
+    content = _propose_on_sampled_table(tools, orders_df, monkeypatch, {
+        "expectation_type": "expect_column_max_to_be_between",
+        "kwargs": {"column": "amount", "max_value": 5000},
+    }, spy)
+    assert spy == ["amount"]
+    assert "actual max 99999 is above the proposed max_value 5000" in content
+
+
+def test_propose_contract_confirms_a_min_bound_against_the_real_min(tools, orders_df, monkeypatch):
+    content = _propose_on_sampled_table(tools, orders_df, monkeypatch, {
+        "expectation_type": "expect_column_min_to_be_between",
+        "kwargs": {"column": "amount", "min_value": 0},
+    }, [])
+    assert "actual min -200 is below the proposed min_value 0" in content
+
+
+def test_propose_contract_skips_bounds_for_a_freshness_parameter(tools, orders_df, monkeypatch):
+    """A {"$PARAMETER": ...} bound is evaluated by GX at run time: there is nothing to
+    query, and comparing it to a date must not surface as a 'could not confirm' note."""
+    spy = []
+    content = _propose_on_sampled_table(tools, orders_df, monkeypatch, {
+        "expectation_type": "expect_column_min_to_be_between",
+        "kwargs": {"column": "created_at", "min_value": {"$PARAMETER": "now() - timedelta(days=30)"}},
+    }, spy)
+    assert spy == []
+    assert "could not confirm" not in content
+
+
 def test_propose_contract_skips_bounds_when_not_sampled(tools, orders_df, monkeypatch):
     spy = []
     _mock_pg(monkeypatch, orders_df, sampled=False, estimated_rows=20,
@@ -317,6 +398,17 @@ def test_graph_pauses_on_approval_interrupt(tmp_path, registry, synthetic_data_p
     assert not list(tmp_path.glob("*.yaml")), "nothing persists before approval"
 
 
+def test_reopened_thread_resumes_at_the_gate(tmp_path, registry, synthetic_data_path):
+    """A driver reopening a saved thread finds the pending gate rather than starting a new turn,
+    which would leave the approval tool call unanswered."""
+    graph, config = _scoping_graph(tmp_path, registry, synthetic_data_path, "done")
+    graph.invoke({"messages": [HumanMessage("scope orders.csv")]}, config)
+
+    saved = saved_result(graph, config)
+    assert pending_interrupt(saved)["action_requests"][0]["name"] == "approve_contract"
+    assert saved_result(graph, {"configurable": {"thread_id": "never-used"}}) is None
+
+
 def test_accept_persists_contract_data_flow_loads(
     tmp_path, registry, synthetic_data_path, monkeypatch
 ):
@@ -378,6 +470,59 @@ def test_text_string_approve_persists(tmp_path, registry, synthetic_data_path, m
     graph.invoke(Command(resume="approve"), config)
 
     assert (tmp_path / "synthetic.orders.yaml").exists()
+
+
+def test_bare_decision_resume_persists(tmp_path, registry, synthetic_data_path, monkeypatch):
+    monkeypatch.setenv("DQ_AGENT_APPROVER", "jacopo")
+    graph, config = _scoping_graph(tmp_path, registry, synthetic_data_path, "approved!")
+    graph.invoke({"messages": [HumanMessage("scope orders.csv")]}, config)
+    graph.invoke(Command(resume=[{"type": "approve"}]), config)
+
+    assert (tmp_path / "synthetic.orders.yaml").exists()
+
+
+def test_typed_feedback_resume_does_not_approve(tmp_path, registry, synthetic_data_path):
+    graph, config = _scoping_graph(tmp_path, registry, synthetic_data_path, "ok, revising")
+    graph.invoke({"messages": [HumanMessage("scope orders.csv")]}, config)
+    result = graph.invoke(Command(resume="make amount a warning"), config)
+
+    assert not list(tmp_path.glob("*.yaml"))
+    assert "make amount a warning" in result["messages"][-2].content
+
+
+def test_approving_over_an_existing_contract_says_so(
+    tmp_path, registry, synthetic_data_path, monkeypatch
+):
+    monkeypatch.setenv("DQ_AGENT_APPROVER", "jacopo")
+    (tmp_path / "synthetic.orders.yaml").write_text("previous: contract\n")
+    graph, config = _scoping_graph(tmp_path, registry, synthetic_data_path, "approved!")
+    paused = graph.invoke({"messages": [HumanMessage("scope orders.csv")]}, config)
+    assert "Approving replaces the existing contract" in (
+        paused["__interrupt__"][0].value["action_requests"][0]["description"]
+    )
+
+    result = graph.invoke(Command(resume={"decisions": [{"type": "approve"}]}), config)
+    assert "replacing the previous contract" in result["messages"][-2].content
+    assert load_contract(tmp_path / "synthetic.orders.yaml")["approval"]["approved_by"] == "jacopo"
+
+
+def test_edit_for_a_different_table_is_refused(tmp_path, registry, synthetic_data_path):
+    """The owner reviewed a card for the draft's table; an edit cannot retarget it."""
+    graph, config = _scoping_graph(tmp_path, registry, synthetic_data_path, "ok")
+    graph.invoke({"messages": [HumanMessage("scope orders.csv")]}, config)
+
+    edited = graph.get_state(config).values["draft"]
+    edited["dataset"]["table"] = "customers"
+    edited["suite"]["name"] = "synthetic.customers"
+    result = graph.invoke(
+        Command(resume={"decisions": [{
+            "type": "edit",
+            "edited_action": {"name": "approve_contract", "args": {"contract": edited}},
+        }]}),
+        config,
+    )
+    assert not list(tmp_path.glob("*.yaml"))
+    assert "targets a different table" in result["messages"][-2].content
 
 
 def _converse_tool_stream(name, args, call_id):
@@ -450,10 +595,10 @@ def test_streamed_run_still_pauses_on_the_approval_interrupt(
 
 def test_list_unlisted_expectations_shows_gx_docs(tools):
     catalogue = tools["list_unlisted_expectations"].invoke({})
-    assert "expect_column_value_lengths_to_be_between" in catalogue
+    assert "expect_column_mean_to_be_between" in catalogue
     assert "expect_column_values_to_be_unique" not in catalogue  # already allowed
     detail = tools["list_unlisted_expectations"].invoke(
-        {"expectation_type": "expect_column_value_lengths_to_be_between"}
+        {"expectation_type": "expect_column_mean_to_be_between"}
     )
     assert "min_value" in detail and "Postgres: supported" in detail
 
@@ -461,11 +606,11 @@ def test_list_unlisted_expectations_shows_gx_docs(tools):
 def test_propose_new_expectation_writes_proposal_not_draft(registry, tmp_path):
     tools = {t.name: t for t in _make_tools(registry, tmp_path)}
     message = tools["propose_new_expectation"].invoke({
-        "expectation_type": "expect_column_value_lengths_to_be_between",
-        "rationale": "postcodes are 6-8 characters",
-        "example_kwargs": {"column": "postcode", "min_value": 6, "max_value": 8},
-        "example_pass": "SW1A 1AA",
-        "example_fail": "SW1",
+        "expectation_type": "expect_column_mean_to_be_between",
+        "rationale": "the average order is between 10 and 200",
+        "example_kwargs": {"column": "amount", "min_value": 10, "max_value": 200},
+        "example_pass": "a day of typical orders",
+        "example_fail": "a day where a pricing bug zeroes most amounts",
         "table": "synthetic.orders",
         "state": {},
     })
@@ -481,3 +626,159 @@ def test_propose_new_expectation_rejects_allowed_one(tools, tmp_path):
         "table": "synthetic.orders", "state": {},
     })
     assert "already allowed" in message
+
+
+# --- edges of the tools and the gate --------------------------------------
+
+
+def test_proposed_kwargs_that_are_not_json_are_refused():
+    with pytest.raises(ValueError):
+        ProposedExpectation(expectation_type="expect_column_values_to_be_unique", kwargs="{not json")
+
+
+def test_profile_dataset_refuses_a_directory_and_an_unsupported_type(registry, tmp_path):
+    (tmp_path / "notes.txt").write_text("x\n", encoding="utf-8")
+    tools = {t.name: t for t in _make_tools(registry, data_dir=tmp_path)}
+    profile = tools["profile_dataset"]
+    assert "no file at" in profile.invoke(
+        _tool_call("profile_dataset", {"path": str(tmp_path)})).update["messages"][0].content
+    assert "unsupported file type '.txt'" in profile.invoke(
+        _tool_call("profile_dataset", {"path": str(tmp_path / "notes.txt")})).update["messages"][0].content
+
+
+def test_profile_dataset_reports_an_unreadable_file(registry, tmp_path):
+    (tmp_path / "broken.parquet").write_bytes(b"not parquet")
+    tools = {t.name: t for t in _make_tools(registry, data_dir=tmp_path)}
+    content = tools["profile_dataset"].invoke(
+        _tool_call("profile_dataset", {"path": str(tmp_path / "broken.parquet")})).update["messages"][0].content
+    assert content.startswith("error: could not read")
+
+
+def test_list_unlisted_expectations_refuses_an_allowed_one(tools):
+    assert "already allowed" in tools["list_unlisted_expectations"].invoke(
+        {"expectation_type": "expect_column_values_to_be_unique"})
+
+
+def test_propose_new_expectation_needs_a_table(tools):
+    result = tools["propose_new_expectation"].invoke({
+        "expectation_type": "expect_column_mean_to_be_between", "rationale": "r",
+        "example_kwargs": {"column": "amount", "min_value": 1}, "example_pass": "p", "example_fail": "f",
+        "state": {"profile": {}, "source_table": None},
+    })
+    assert "which Postgres table" in result
+
+
+def test_propose_contract_needs_a_table_for_a_file(tools, synthetic_data_path):
+    profiled = tools["profile_dataset"].invoke(
+        _tool_call("profile_dataset", {"path": str(synthetic_data_path / "orders.csv")}))
+    command = tools["propose_contract"].invoke(_tool_call("propose_contract", {
+        "expectations": [{"expectation_type": "expect_column_values_to_be_unique", "kwargs": {"column": "order_id"}}],
+        "state": {"profile": profiled.update["profile"], "source_table": None},
+    }))
+    assert "which Postgres table" in command.update["messages"][0].content
+
+
+def _propose_range_on_sampled_table(tools, profiled):
+    return tools["propose_contract"].invoke(_tool_call("propose_contract", {
+        "expectations": [{"expectation_type": "expect_column_values_to_be_between",
+                          "kwargs": {"column": "amount", "min_value": 0}}],
+        "state": {"profile": profiled.update["profile"], "source_table": "public.orders"},
+    })).update["messages"][0].content
+
+
+def test_bounds_note_when_the_dsn_is_gone(tools, orders_df, monkeypatch):
+    _mock_pg(monkeypatch, orders_df, sampled=True, estimated_rows=5_000_000)
+    profiled = tools["profile_table"].invoke(_tool_call("profile_table", {"table": "public.orders"}))
+
+    def no_dsn(*args, **kwargs):
+        raise KeyError("environment variable 'DATABASE_DSN__datasets_1' is not set")
+
+    monkeypatch.setattr(connectors, "resolve_dsn", no_dsn)
+    assert "could not confirm range bounds against the table" in _propose_range_on_sampled_table(tools, profiled)
+
+
+def test_bounds_note_when_the_bounds_query_fails(tools, orders_df, monkeypatch):
+    _mock_pg(monkeypatch, orders_df, sampled=True, estimated_rows=5_000_000)
+
+    def broken(uri, table, column):
+        raise RuntimeError("relation does not exist")
+
+    monkeypatch.setattr(connectors, "column_bounds", broken)
+    profiled = tools["profile_table"].invoke(_tool_call("profile_table", {"table": "public.orders"}))
+    assert "range on 'amount': could not confirm bounds (relation does not exist)" in (
+        _propose_range_on_sampled_table(tools, profiled))
+
+
+def _gate_graph(tmp_path, registry, script):
+    return build_graph(model=ScriptedModel(messages=iter(script)), registry=registry,
+                       contracts_dir=tmp_path, checkpointer=InMemorySaver())
+
+
+def test_approval_without_a_draft_asks_for_one(tmp_path, registry):
+    graph = _gate_graph(tmp_path, registry, [
+        AIMessage("", tool_calls=[_tool_call("request_approval", {}, "c1")]), AIMessage("ok")])
+    result = graph.invoke({"messages": [HumanMessage("approve it")]}, {"configurable": {"thread_id": "t"}})
+    assert "no draft contract" in result["messages"][-2].content
+    assert not list(tmp_path.glob("*.yaml"))
+
+
+def test_tool_calls_bundled_with_the_approval_are_refused(tmp_path, registry, synthetic_data_path):
+    csv = str(synthetic_data_path / "orders.csv")
+    graph = _gate_graph(tmp_path, registry, [
+        AIMessage("", tool_calls=[_tool_call("request_approval", {}, "c1"),
+                                  _tool_call("profile_dataset", {"path": csv}, "c2")]),
+        AIMessage("ok"),
+    ])
+    result = graph.invoke({"messages": [HumanMessage("go")]}, {"configurable": {"thread_id": "t"}})
+    replies = {m.tool_call_id: m.content for m in result["messages"] if m.type == "tool"}
+    assert replies["c2"] == "skipped: resolve the approval request first"
+    assert "no draft contract" in replies["c1"]
+
+
+@pytest.mark.parametrize("edited, message", [
+    ("not a contract", "edited contract is malformed"),
+    ({"dataset": {"schema": "synthetic", "table": "orders"},
+      "suite": {"name": "synthetic.orders", "expectations": [
+          {"expectation_type": "expect_column_values_to_be_unique", "kwargs": {"column": "x", "evil": 1}}]}},
+     "edited contract is invalid"),
+])
+def test_a_bad_edit_goes_back_to_the_agent(tmp_path, registry, synthetic_data_path, edited, message):
+    graph, config = _scoping_graph(tmp_path, registry, synthetic_data_path, "revising")
+    graph.invoke({"messages": [HumanMessage("scope orders.csv")]}, config)
+    result = graph.invoke(Command(resume={"decisions": [{"type": "edit", "edited_action": {
+        "name": "approve_contract", "args": {"contract": edited}}}]}), config)
+    assert message in result["messages"][-2].content
+    assert not list(tmp_path.glob("*.yaml"))
+
+
+def test_the_approver_named_in_the_decision_wins(tmp_path, registry, synthetic_data_path, monkeypatch):
+    monkeypatch.setenv("DQ_AGENT_APPROVER", "someone-else")
+    graph, config = _scoping_graph(tmp_path, registry, synthetic_data_path, "done")
+    graph.invoke({"messages": [HumanMessage("scope orders.csv")]}, config)
+    graph.invoke(Command(resume={"decisions": [{"type": "approve", "args": {"approved_by": "owner@dept"}}]}), config)
+    assert load_contract(tmp_path / "synthetic.orders.yaml")["approval"]["approved_by"] == "owner@dept"
+
+
+def test_a_reject_without_a_message_says_so(tmp_path, registry, synthetic_data_path):
+    graph, config = _scoping_graph(tmp_path, registry, synthetic_data_path, "ok")
+    graph.invoke({"messages": [HumanMessage("scope orders.csv")]}, config)
+    result = graph.invoke(Command(resume={"decisions": [{"type": "reject"}]}), config)
+    assert result["messages"][-2].content == "owner did not approve; feedback: none given"
+
+
+def test_build_graph_defaults_to_the_bedrock_model_and_repo_registry(monkeypatch):
+    """No proxy call happens at build time, so the default graph compiles anywhere."""
+    monkeypatch.setenv("DQ_AGENT_MODEL", "eu.anthropic.test-model")
+    monkeypatch.setenv("DQ_AGENT_PROMPT_CACHE", "0")
+    built = {}
+    real = DeptBedrockChat.bind_tools
+
+    def spy(self, tools, **kwargs):
+        built["model"] = self
+        return real(self, tools, **kwargs)
+
+    monkeypatch.setattr(DeptBedrockChat, "bind_tools", spy)
+    graph = build_graph()
+    assert set(graph.nodes) >= {"agent", "tools", "approval"}
+    assert built["model"].model_id == "eu.anthropic.test-model"
+    assert built["model"].cache_prompt is False

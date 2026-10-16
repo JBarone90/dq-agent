@@ -1,0 +1,13 @@
+# Coverage of the dq-agent side: `uv run pytest --cov`. The data-flow kit is a separate
+# component (tests_kit/ checks it against gx_contract in this checkout), so it is not counted.
+[run]
+source =
+    src/dq_agent
+    app
+    scripts
+
+[report]
+show_missing = true
+skip_covered = true
+exclude_also =
+    if __name__ == .__main__.:

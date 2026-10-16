@@ -1,8 +1,7 @@
-import os
-
 import polars as pl
 import pytest
 
+from dq_agent import connectors
 from dq_agent.connectors import (
     DEFAULT_DSN_ENV,
     column_bounds,
@@ -12,12 +11,10 @@ from dq_agent.connectors import (
     load_parquet,
     load_postgres,
     load_postgres_profiling,
+    quote_table,
     resolve_dsn,
 )
-from dq_agent.profiler import profile
 from tests.conftest import DATA_DIR, TOTAL_ROWS
-
-POSTGRES_URI = os.environ.get("DQ_TEST_POSTGRES_URI")
 
 
 def test_load_csv_parses_dates():
@@ -100,7 +97,8 @@ def test_column_bounds_returns_exact_min_max(monkeypatch):
     monkeypatch.setattr(pl, "read_database_uri", fake_read)
     lo, hi = column_bounds("postgresql://localhost/db", "public.orders", "amount")
     assert (lo, hi) == (0, 4999)
-    assert "min(amount)" in captured["query"] and "max(amount)" in captured["query"]
+    # quoted, as GX quotes them, so a mixed-case name is not folded to lower case
+    assert captured["query"] == 'SELECT min("amount") AS lo, max("amount") AS hi FROM "public"."orders"'
 
 
 def test_column_bounds_rejects_malformed_column():
@@ -157,6 +155,8 @@ def test_estimate_row_count_reads_planner_statistics(monkeypatch):
     queries = _fake_pg(monkeypatch, estimate=5000)
     assert estimate_row_count("postgresql://localhost/db", "orders") == 5000
     assert "pg_class" in queries[0] and "reltuples" in queries[0]
+    # resolved the way SELECT * FROM resolves it, so the estimate is for the table that is read
+    assert """to_regclass('"orders"')""" in queries[0]
 
 
 def test_estimate_row_count_unknown_returns_none(monkeypatch):
@@ -170,7 +170,7 @@ def test_profiling_load_full_when_under_cap(monkeypatch):
     load = load_postgres_profiling("postgresql://localhost/db", table="orders", max_rows=1000)
     assert load.sampled is False
     assert load.estimated_rows == 100
-    assert queries[-1] == "SELECT * FROM orders"  # whole table, no sampling
+    assert queries[-1] == 'SELECT * FROM "orders"'  # whole table, no sampling
 
 
 def test_profiling_load_tablesamples_when_over_cap(monkeypatch):
@@ -187,25 +187,115 @@ def test_profiling_load_falls_back_to_limit_when_estimate_unknown(monkeypatch):
     load = load_postgres_profiling("postgresql://localhost/db", table="orders", max_rows=50_000)
     assert load.sampled is True
     assert load.estimated_rows is None
-    assert queries[-1] == "SELECT * FROM orders LIMIT 50000"  # bounded, no TABLESAMPLE
+    assert queries[-1] == 'SELECT * FROM "orders" LIMIT 50000'  # bounded, no TABLESAMPLE
 
 
-@pytest.mark.skipif(POSTGRES_URI is None, reason="DQ_TEST_POSTGRES_URI not set")
-def test_postgres_and_csv_produce_identical_report_format(orders_df):
-    # Phase 2 exit criterion: same structured report from a file and a Postgres table
-    pg_df = load_postgres(POSTGRES_URI, table="orders")
-    pg_report = profile(pg_df, dataset="orders")
-    csv_report = profile(orders_df, dataset="orders")
+# A live Postgres comparison of file and table profiles is in tests/test_postgres.py.
 
-    assert pg_report.table.row_count == csv_report.table.row_count
-    assert pg_report.table.duplicate_row_count == csv_report.table.duplicate_row_count
 
-    assert [c.name for c in pg_report.columns] == [c.name for c in csv_report.columns]
-    for pg_col, csv_col in zip(pg_report.columns, csv_report.columns):
-        # dtype strings may legitimately differ across sources (e.g. Int32 vs Int64);
-        # every measured statistic must not
-        assert pg_col.null_rate == csv_col.null_rate, pg_col.name
-        assert pg_col.uniqueness_ratio == csv_col.uniqueness_ratio, pg_col.name
-        assert pg_col.min == csv_col.min, pg_col.name
-        assert pg_col.max == csv_col.max, pg_col.name
-        assert pg_col.semantic_hint == csv_col.semantic_hint, pg_col.name
+@pytest.mark.parametrize("name, quoted", [
+    ("orders", '"orders"'),
+    ("public.Orders", '"public"."Orders"'),
+])
+def test_quote_table_keeps_exact_case(name, quoted):
+    assert quote_table(name) == quoted
+
+
+def test_quote_table_rejects_a_quote_character():
+    with pytest.raises(ValueError, match="invalid table name"):
+        quote_table('orders"; DROP TABLE x; --')
+
+
+def _libpq(monkeypatch, parsed):
+    monkeypatch.setattr(connectors, "_parse_libpq_dsn", lambda conn_str: parsed)
+
+
+def test_libpq_dsn_becomes_a_uri_with_escaped_credentials(monkeypatch):
+    _libpq(monkeypatch, {"host": "db", "port": "5432", "dbname": "dw", "user": "me@corp", "password": "p/w:x"})
+    assert connectors._normalise_postgres_uri("host=db ...") == "postgresql://me%40corp:p%2Fw%3Ax@db:5432/dw"
+
+
+def test_libpq_dsn_leaves_out_what_libpq_would_default(monkeypatch):
+    """No password (.pgpass) and no port are not errors; extra options ride as query parameters."""
+    _libpq(monkeypatch, {"host": "db", "dbname": "dw", "user": "me", "sslmode": "require"})
+    assert connectors._normalise_postgres_uri("host=db ...") == "postgresql://me@db/dw?sslmode=require"
+
+
+def test_ready_uri_passes_through_unparsed(monkeypatch):
+    _libpq(monkeypatch, None)  # would break if it were called
+    assert connectors._normalise_postgres_uri("postgres://u@h/d") == "postgres://u@h/d"
+
+
+# --- edges ------------------------------------------------------------------
+
+
+def test_a_libpq_dsn_is_parsed_by_psycopg():
+    pytest.importorskip("psycopg")
+    assert connectors._parse_libpq_dsn("host=db port=5432 dbname=dw user=me") == {
+        "host": "db", "port": "5432", "dbname": "dw", "user": "me"}
+
+
+def test_a_libpq_dsn_falls_back_to_psycopg2(monkeypatch):
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, "psycopg.conninfo", None)
+    extensions = types.ModuleType("psycopg2.extensions")
+    extensions.parse_dsn = lambda conn_str: {"host": "db", "dbname": "dw"}
+    monkeypatch.setitem(sys.modules, "psycopg2", types.ModuleType("psycopg2"))
+    monkeypatch.setitem(sys.modules, "psycopg2.extensions", extensions)
+    assert connectors._parse_libpq_dsn("host=db dbname=dw") == {"host": "db", "dbname": "dw"}
+
+
+def test_a_libpq_dsn_without_either_driver_says_what_to_install(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "psycopg.conninfo", None)
+    monkeypatch.setitem(sys.modules, "psycopg2.extensions", None)
+    with pytest.raises(ImportError, match="uv sync --extra postgres"):
+        connectors._parse_libpq_dsn("host=db")
+
+
+def test_a_libpq_dsn_with_only_defaults_becomes_a_local_uri(monkeypatch):
+    _libpq(monkeypatch, {"dbname": "dw", "sslmode": "require"})
+    assert connectors._normalise_postgres_uri("dbname=dw sslmode=require") == "postgresql://localhost/dw?sslmode=require"
+
+
+@pytest.mark.parametrize("query", [
+    "SELECT * FROM orders; DELETE FROM orders",
+    "WITH x AS (SELECT 1) UPDATE orders SET a = 1",
+])
+def test_a_mutating_query_is_refused(query):
+    with pytest.raises(ValueError, match="forbidden"):
+        load_postgres("postgresql://x/y", query=query)
+
+
+def test_profiling_load_resolves_the_dsn_from_the_environment(monkeypatch):
+    queries = _fake_pg(monkeypatch, estimate=10)
+    monkeypatch.setenv("DATABASE_DSN__datasets_1", "postgresql://env/db")
+    seen = []
+    real = pl.read_database_uri
+    monkeypatch.setattr(pl, "read_database_uri", lambda q, uri, engine: (seen.append(uri), real(q, uri, engine))[1])
+    load = load_postgres_profiling(table="orders", max_rows=50)
+    assert load.sampled is False
+    assert set(seen) == {"postgresql://env/db"}
+    assert queries
+
+
+def test_column_bounds_of_an_empty_result(monkeypatch):
+    monkeypatch.setattr(pl, "read_database_uri", lambda q, uri, engine: pl.DataFrame({"lo": [], "hi": []}))
+    assert connectors.column_bounds("postgresql://x/y", "orders", "amount") == (None, None)
+
+
+def test_column_bounds_refuses_a_column_that_is_not_an_identifier():
+    with pytest.raises(ValueError, match="invalid column name"):
+        connectors.column_bounds("postgresql://x/y", "orders", 'amount"; --')
+
+
+def test_a_missing_connectorx_says_what_to_install(monkeypatch):
+    def no_connectorx(query, uri, engine):
+        raise ImportError("connectorx")
+
+    monkeypatch.setattr(pl, "read_database_uri", no_connectorx)
+    with pytest.raises(ImportError, match="uv sync --extra postgres"):
+        load_postgres("postgresql://x/y", table="orders")

@@ -1,9 +1,21 @@
+import os
 from pathlib import Path
 
 import polars as pl
 import pytest
 
 from dq_agent.registry import Registry
+
+# The suite must run with no internet access. Great Expectations otherwise posts anonymous usage
+# statistics from every context it creates; set before any test builds one.
+os.environ.setdefault("GE_USAGE_STATS", "FALSE")
+
+
+def pytest_configure(config):
+    # Tests that need more than the repo, so a run can select or exclude them:
+    #   uv run pytest -m "not postgres and not integration"   # the repo alone, offline
+    #   uv run pytest -m postgres                              # where DQ_TEST_POSTGRES_URI reaches a database
+    config.addinivalue_line("markers", "postgres: needs a Postgres database (DQ_TEST_POSTGRES_URI)")
 
 DATA_DIR = Path(__file__).parent.parent / "data" / "synthetic"
 REGISTRY_FILE = Path(__file__).parent.parent / "registry" / "expectations.yaml"

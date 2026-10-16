@@ -192,7 +192,8 @@ def test_generate_usage_absent_is_none(monkeypatch):
     assert result.usage_metadata is None
 
 
-def test_generate_captures_cost_and_tokens_from_headers(monkeypatch):
+def test_generate_metadata_carries_only_the_stop_reason(monkeypatch):
+    """Cost is not read from the proxy's headers: the response metadata is the stop reason."""
     monkeypatch.setattr(
         bedrock_chat, "_invoke",
         lambda request, **kw: FakeResponse(
@@ -201,18 +202,7 @@ def test_generate_captures_cost_and_tokens_from_headers(monkeypatch):
         ),
     )
     result = DeptBedrockChat().invoke([HumanMessage("hi")])
-    assert result.response_metadata["cost_usd"] == 0.0034
-    assert result.response_metadata["tokens_used"] == 42
-
-
-def test_generate_omits_cost_when_header_absent(monkeypatch):
-    monkeypatch.setattr(
-        bedrock_chat, "_invoke",
-        lambda request, **kw: FakeResponse(_converse([{"text": "ok"}])),
-    )
-    result = DeptBedrockChat().invoke([HumanMessage("hi")])
-    assert "cost_usd" not in result.response_metadata
-    assert "tokens_used" not in result.response_metadata
+    assert set(result.response_metadata) == {"stop_reason"}
 
 
 def test_generate_includes_system_when_present(monkeypatch):
@@ -323,23 +313,6 @@ def test_generate_surfaces_cache_tokens_from_usage_block(monkeypatch):
     assert result.usage_metadata["input_token_details"] == {
         "cache_read": 900, "cache_creation": 0,
     }
-
-
-def test_generate_falls_back_to_cache_headers(monkeypatch):
-    """The proxy stamps cache counts on the response headers too; use them when the
-    Converse usage block does not carry the fields."""
-    monkeypatch.setattr(
-        bedrock_chat, "_invoke",
-        lambda request, **kw: FakeResponse(
-            _converse([{"text": "ok"}], usage={"inputTokens": 10, "outputTokens": 5}),
-            headers={"x-cache-read-tokens": "40", "x-cache-write-tokens": "2"},
-        ),
-    )
-    result = DeptBedrockChat().invoke([HumanMessage("hi")])
-    assert result.usage_metadata["input_token_details"] == {
-        "cache_read": 40, "cache_creation": 2,
-    }
-    assert result.usage_metadata["input_tokens"] == 52
 
 
 def test_generate_omits_cache_details_when_unreported(monkeypatch):
@@ -530,65 +503,7 @@ def test_stream_and_generate_send_the_same_request_shape(monkeypatch):
     assert [streamed for _, streamed in seen] == [False, True]
 
 
-# --- streamed turns are priced locally ------------------------------------
-
-
-_PRICES = {"input": 3.3, "output": 16.5, "cache_read": 0.33, "cache_write_5m": 4.125}
-
-
-def test_streamed_turn_is_priced_from_the_proxys_published_rates(monkeypatch):
-    """A stream's headers are sent before a single token exists, so the proxy cannot
-    stamp x-cost on it. Token counts arrive in the closing metadata event instead, and
-    multiplying them by `get_model_info` prices recovers the number."""
-    monkeypatch.setitem(bedrock_chat._PRICING, bedrock_chat.DEFAULT_MODEL_ID, _PRICES)
-    monkeypatch.setattr(bedrock_chat, "_invoke", _stream_events(
-        {"contentBlockDelta": {"delta": {"text": "ok"}}},
-        {"metadata": {"usage": {
-            "inputTokens": 1_000_000, "outputTokens": 0, "totalTokens": 1_000_000,
-        }}},
-    ))
-    chunks = list(DeptBedrockChat().stream([HumanMessage("hi")]))
-    priced = [c for c in chunks if "cost_usd" in (c.response_metadata or {})]
-    assert len(priced) == 1
-    assert priced[0].response_metadata["cost_usd"] == pytest.approx(3.3)
-    assert priced[0].response_metadata["cost_source"] == "computed"
-
-
-def test_streamed_cost_prices_cache_tokens_at_the_cache_rate(monkeypatch):
-    """Cached input is the whole point of caching, so it must not be billed as input."""
-    monkeypatch.setitem(bedrock_chat._PRICING, bedrock_chat.DEFAULT_MODEL_ID, _PRICES)
-    monkeypatch.setattr(bedrock_chat, "_invoke", _stream_events(
-        {"metadata": {"usage": {
-            "inputTokens": 0, "outputTokens": 0, "totalTokens": 1_000_000,
-            "cacheReadInputTokens": 1_000_000,
-        }}},
-    ))
-    chunk = list(DeptBedrockChat().stream([HumanMessage("hi")]))[0]
-    assert chunk.response_metadata["cost_usd"] == pytest.approx(0.33)
-
-
-def test_streamed_turn_without_pricing_carries_no_cost(monkeypatch):
-    """Off-network the pricing lookup fails; a missing cost must stay missing rather
-    than becoming a zero the sidebar would total up."""
-    monkeypatch.setitem(bedrock_chat._PRICING, bedrock_chat.DEFAULT_MODEL_ID, None)
-    monkeypatch.setattr(bedrock_chat, "_invoke", _stream_events(
-        {"metadata": {"usage": {"inputTokens": 10, "outputTokens": 5}}},
-    ))
-    chunk = list(DeptBedrockChat().stream([HumanMessage("hi")]))[0]
-    assert "cost_usd" not in (chunk.response_metadata or {})
-    assert chunk.usage_metadata["input_tokens"] == 10
-
-
-def test_non_streamed_cost_is_labelled_as_the_proxys(monkeypatch):
-    monkeypatch.setattr(
-        bedrock_chat, "_invoke",
-        lambda request, **kw: FakeResponse(
-            _converse([{"text": "ok"}]), headers={"x-cost": "$0.0034"}
-        ),
-    )
-    result = DeptBedrockChat().invoke([HumanMessage("hi")])
-    assert result.response_metadata["cost_usd"] == 0.0034
-    assert result.response_metadata["cost_source"] == "proxy"
+# --- cache TTL and tool binding --------------------------------------------
 
 
 def test_cache_point_asks_for_the_one_hour_ttl():
@@ -599,22 +514,92 @@ def test_cache_point_asks_for_the_one_hour_ttl():
     }
 
 
-def test_cache_writes_are_priced_at_the_ttl_we_ask_for(monkeypatch):
-    """Pricing a 1-hour write at the 5-minute rate would under-report every session,
-    so the rate has to follow CACHE_TTL rather than being pinned to 5m."""
-    monkeypatch.setitem(bedrock_chat._PRICING, bedrock_chat.DEFAULT_MODEL_ID, _PRICES | {
-        "cache_write_1h": 4.4,
-    })
+def test_streamed_usage_carries_cache_tokens(monkeypatch):
     monkeypatch.setattr(bedrock_chat, "_invoke", _stream_events(
         {"metadata": {"usage": {
-            "inputTokens": 0, "outputTokens": 0, "cacheWriteInputTokens": 1_000_000,
+            "inputTokens": 10, "outputTokens": 5, "totalTokens": 15,
+            "cacheReadInputTokens": 900, "cacheWriteInputTokens": 40,
         }}},
     ))
-    chunk = list(DeptBedrockChat().stream([HumanMessage("hi")]))[0]
-    assert chunk.response_metadata["cost_usd"] == pytest.approx(4.4)
+    (chunk,) = [c for c in DeptBedrockChat().stream([HumanMessage("hi")]) if c.usage_metadata]
+    assert chunk.usage_metadata["input_tokens"] == 950
+    assert chunk.usage_metadata["input_token_details"] == {"cache_read": 900, "cache_creation": 40}
+    assert not chunk.response_metadata.get("cost_usd")
 
 
-def test_write_rate_falls_back_when_the_ttl_is_not_priced():
-    """A model that prices only the 5m write must not silently cost nothing."""
-    assert bedrock_chat._write_rate({"cache_write_5m": 2.75}) == 2.75
-    assert bedrock_chat._write_rate({}) == 0.0
+def test_bind_tools_refuses_tool_choice():
+    """Converse's toolChoice is not translated, so asking for one must fail loudly."""
+    with pytest.raises(NotImplementedError, match="tool_choice"):
+        DeptBedrockChat().bind_tools([get_weather], tool_choice="any")
+
+
+# --- edges ------------------------------------------------------------------
+
+
+def test_without_dwutils_the_error_says_to_inject_a_model(monkeypatch):
+    """Off the work network dwutils is absent; the message must say what to do instead."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "dwutils", None)  # makes `from dwutils import bedrock` fail
+    with pytest.raises(BedrockProxyError, match=r"inject a model: build_graph\(model=\.\.\.\)"):
+        DeptBedrockChat().invoke([HumanMessage("hi")])
+
+
+def test_an_unsupported_message_type_is_refused():
+    from langchain_core.messages import ChatMessage
+
+    with pytest.raises(TypeError, match="unsupported message type: ChatMessage"):
+        bedrock_chat._to_converse([ChatMessage(role="critic", content="x")])
+
+
+def test_events_that_carry_nothing_are_skipped(monkeypatch):
+    monkeypatch.setattr(bedrock_chat, "_invoke", _stream_events(
+        {"contentBlockStart": {"start": {}, "contentBlockIndex": 0}},  # a text block starting
+        {"contentBlockDelta": {"delta": {"reasoningContent": {"text": "..."}}, "contentBlockIndex": 0}},
+        {"contentBlockDelta": {"delta": {"text": "ok"}, "contentBlockIndex": 0}},
+        {"metadata": {}},
+        {"somethingNew": {}},
+    ))
+    chunks = list(DeptBedrockChat().stream([HumanMessage("hi")]))
+    assert [c.content for c in chunks if c.content] == ["ok"]  # LangChain adds an empty closing chunk
+
+
+def test_no_cache_point_without_messages():
+    request = {"model_id": "m", "messages": []}
+    assert bedrock_chat._with_cache_points(request) is request
+
+
+def test_streamed_tokens_reach_the_callback(monkeypatch):
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    class Collect(BaseCallbackHandler):
+        def __init__(self):
+            self.tokens = []
+
+        def on_llm_new_token(self, token, **kwargs):
+            self.tokens.append(token)
+
+    monkeypatch.setattr(bedrock_chat, "_invoke", _stream_events(
+        {"contentBlockDelta": {"delta": {"text": "Hel"}, "contentBlockIndex": 0}},
+        {"contentBlockDelta": {"delta": {"text": "lo"}, "contentBlockIndex": 0}},
+    ))
+    handler = Collect()
+    list(DeptBedrockChat().stream([HumanMessage("hi")], config={"callbacks": [handler]}))
+    assert [t for t in handler.tokens if t] == ["Hel", "lo"]
+
+
+@pytest.mark.parametrize("status, hint", [
+    (400, "Converse shape"), (401, "BEDROCK_TOKEN"), (404, "model_id is not available"),
+    (429, "throttling"), (None, "never replied"), (500, None),
+])
+def test_every_status_gets_its_hint(status, hint):
+    class Failure(RuntimeError):
+        status_code = status
+
+    message = bedrock_chat._diagnose({"model_id": "m"}, Failure("boom"))
+    assert message.startswith("bedrock-proxy call failed: boom")
+    assert message.endswith("model_id: 'm'")
+    if hint:
+        assert hint in message
+    else:
+        assert len(message.splitlines()) == 2  # no hint for an unexpected status
