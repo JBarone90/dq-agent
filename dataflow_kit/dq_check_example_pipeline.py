@@ -1,6 +1,6 @@
 """Example validation-only DAG: runs the approved data quality contract for one table.
 
-It runs no ingestion. It loads `contracts/<schema>.<table>.yaml` and validates the table with Great Expectations through `dq_validation.run_contract`. A failed expectation raises, so Airflow marks the run failed.
+It runs no ingestion. It loads `contracts/<schema>.<table>.yaml` and validates the table with Great Expectations through `dq_validation.run_contract`. A failed `error` expectation raises, so Airflow marks the run failed; a failed `warning` expectation is logged and recorded in the validation result, and the run completes. An expectation without a severity is an `error`.
 
 Before using it at work:
 - copy it into the team folder as `dags/<team>/dq_check_<table>_pipeline.py`, next to `operators/` and `contracts/`;

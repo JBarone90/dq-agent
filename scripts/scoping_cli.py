@@ -28,29 +28,16 @@ from __future__ import annotations
 import argparse
 import contextlib
 import uuid
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 from langchain_core.messages import AIMessage
-from langgraph.types import Command
 
 from dq_agent.agents.bedrock_chat import BedrockProxyError
+from dq_agent.agents.gate import decision_from_text, pending_interrupt, resume, saved_result
 from dq_agent.agents.scoping import build_graph
 
 _QUIT = {"quit", "exit", ":q"}
-_APPROVE = {"approve", "yes", "y", "ok", "looks good"}
-
-
-def _pending_interrupt(result: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the interrupt payload if the graph paused at the approval gate, else None.
-
-    A paused run surfaces its interrupt under the `__interrupt__` key; the payload is
-    the dict the `approval` node passed to `interrupt()`. This is what tells a normal
-    conversational turn (send a new message) apart from a pending decision (resume)."""
-    pending = result.get("__interrupt__")
-    if not pending:
-        return None
-    item = pending[0] if isinstance(pending, (list, tuple)) else pending
-    return getattr(item, "value", item)
 
 
 def _last_ai_text(result: dict[str, Any]) -> str:
@@ -59,15 +46,6 @@ def _last_ai_text(result: dict[str, Any]) -> str:
         if isinstance(msg, AIMessage) and msg.content:
             return msg.content if isinstance(msg.content, str) else str(msg.content)
     return ""
-
-
-def _decision_from_input(text: str) -> dict[str, Any]:
-    """Map a typed approval response to a resume decision. Anything that is not an
-    explicit approval becomes reject-with-feedback, so the agent can revise the draft
-    instead of the session ending."""
-    if text.strip().lower() in _APPROVE:
-        return {"type": "approve"}
-    return {"type": "reject", "message": text.strip()}
 
 
 def _prompt(label: str) -> str:
@@ -99,8 +77,9 @@ def _show_gate(payload: dict[str, Any]) -> None:
 def converse(graph: Any, thread_id: str) -> None:
     config = {"configurable": {"thread_id": thread_id}}
 
-    # Kick off with the first user message.
-    result = graph.invoke(
+    # A resumed thread picks up where it stopped (at the gate, if it was paused there);
+    # a new one starts with the first user message.
+    result = saved_result(graph, config) or graph.invoke(
         {"messages": [{"role": "user", "content": _prompt("You:")}]}, config
     )
 
@@ -109,12 +88,11 @@ def converse(graph: Any, thread_id: str) -> None:
             print(f"\n✅ Contract approved and saved to: {result['contract_path']}")
             return
 
-        payload = _pending_interrupt(result)
+        payload = pending_interrupt(result)
         if payload is not None:
             _show_gate(payload)
             answer = _prompt("Approve? [type 'approve', or describe a change to revise]:")
-            resume = {"decisions": [_decision_from_input(answer)]}
-            result = graph.invoke(Command(resume=resume), config)
+            result = graph.invoke(resume(decision_from_text(answer)), config)
         else:
             text = _last_ai_text(result)
             if text:

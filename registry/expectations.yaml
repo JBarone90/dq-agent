@@ -1,7 +1,7 @@
 # Our layer on top of Great Expectations, for the scoping agent and the approval gate.
 #
 # Which expectations are allowed and which kwargs they take is NOT defined here: that comes
-# from the data-flow allowlist (dataflow_kit/dq_validation.py) and from GX 0.18.2 itself,
+# from the allowlist (src/dq_agent/gx_contract.py, kept equal to the data-flow kit) and from GX 0.18.2 itself,
 # including each kwarg's description (the expectation's docstring). This file only adds:
 #   tags     — for list_rules filtering
 #   summary  — plain-English phrasing at the approval gate; {kwarg} placeholders are filled in
@@ -46,13 +46,85 @@ expect_column_values_to_be_in_type_list:
   tags: [validity, conformance]
   summary: "`{column}` must be stored as {type_list}"
   notes: >-
-    Checks the column's declared database type (names as GX reports them for Postgres, e.g.
-    INTEGER, BIGINT, NUMERIC, TEXT, VARCHAR, DATE, TIMESTAMP — confirm against a real run).
-    It does not inspect the contents of a text column; use a regex for that.
+    Checks the column's declared database type. The names are SQLAlchemy's type names, matched
+    exactly and case-sensitively: verified on Postgres 16 are INTEGER, DOUBLE_PRECISION, TEXT and
+    DATE ("DOUBLE PRECISION", FLOAT8, INT4 or lower case fail). Other types follow the same
+    scheme (BIGINT, NUMERIC, VARCHAR, TIMESTAMP); list every acceptable name when unsure. It does
+    not inspect the contents of a text column; use a regex for that.
 
 expect_column_min_to_be_between:
-  tags: [freshness]
-  summary: "`{column}` must have no date older than {min_value}"
+  tags: [validity]
+  summary: "`{column}` must have no date earlier than {min_value}"
   notes: >-
-    Freshness: fails if the oldest date is older than N days before the run. Use exactly
-    min_value {"$PARAMETER": "now() - timedelta(days=N)"}, which GX evaluates at run time.
+    Stale rows, not freshness: fails if the oldest date is older than N days before the run.
+    Use exactly min_value {"$PARAMETER": "now() - timedelta(days=N)"}, which GX evaluates at
+    run time. A table that keeps its history fails this permanently once it is older than N
+    days, so use it only when old rows must not be kept. For freshness (the newest row is
+    recent) use expect_column_max_to_be_between.
+
+expect_column_max_to_be_between:
+  tags: [freshness, validity]
+  summary: "the largest value in `{column}` must be between {min_value} and {max_value}"
+  notes: >-
+    Freshness: with min_value {"$PARAMETER": "now() - timedelta(days=N)"} (exactly that form)
+    it fails when the newest date is older than N days, i.e. loads have stopped. More
+    generally it bounds the column's single largest value, not every row, so it also catches
+    a runaway value. To bound every value, use expect_column_values_to_be_between instead.
+    Give at least one bound.
+
+expect_column_values_to_not_be_in_set:
+  tags: [validity]
+  summary: "`{column}` must never be one of: {value_set}"
+  notes: >-
+    Use for known placeholder or junk values (e.g. "N/A", "unknown", "test", 0 for an id).
+    Nulls are ignored; value_set must not be empty. Prefer expect_column_values_to_be_in_set
+    when the owner can list every valid value.
+
+expect_column_values_to_not_match_regex:
+  tags: [validity, conformance]
+  summary: "`{column}` must not contain a forbidden text pattern"
+  notes: >-
+    Fails rows that match the pattern, e.g. leading/trailing spaces or test markers. GX sends the
+    pattern to Postgres (the ~ operator), so Postgres regex syntax applies, as for
+    expect_column_values_to_match_regex. regex is required. Nulls are ignored.
+
+expect_column_value_lengths_to_be_between:
+  tags: [validity, conformance]
+  summary: "`{column}` must be between {min_value} and {max_value} characters long"
+  notes: >-
+    For text columns with a known length range: codes, postcodes, identifiers. Give at least one
+    bound. Nulls are ignored.
+
+expect_column_pair_values_a_to_be_greater_than_b:
+  tags: [consistency]
+  summary: "`{column_A}` must be greater than `{column_B}` in every row"
+  notes: >-
+    Cross-column ordering within a row, e.g. shipped_at after ordered_at or end_date after
+    start_date. Set or_equal true when equal values are fine. ignore_row_if decides which rows
+    with missing values are skipped: both_values_are_missing (default), either_value_is_missing
+    or neither.
+
+expect_compound_columns_to_be_unique:
+  tags: [uniqueness]
+  summary: "the combination of {column_list} must be unique"
+  notes: >-
+    A composite key: no two rows share the same values across all the listed columns. Needs at
+    least two columns; for a single column use expect_column_values_to_be_unique. ignore_row_if
+    is all_values_are_missing (default), any_value_is_missing or never.
+
+expect_select_column_values_to_be_unique_within_record:
+  tags: [consistency]
+  summary: "{column_list} must all hold different values within each row"
+  notes: >-
+    Within one row, the listed columns must not repeat a value (e.g. primary_phone and
+    secondary_phone, or home_team and away_team). Needs at least two columns. ignore_row_if is
+    all_values_are_missing (default), any_value_is_missing or never.
+
+expect_table_columns_to_match_set:
+  tags: [schema]
+  summary: "the table must have the columns: {column_set}"
+  notes: >-
+    Table-level schema check. With exact_match true (the default) the table must have exactly
+    these columns, so an added or dropped column fails it; with false it only requires them to
+    be present. List the columns from the profile and confirm with the owner whether new
+    columns are expected over time.

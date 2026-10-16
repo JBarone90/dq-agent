@@ -14,11 +14,16 @@ def describe_contract(contract: Contract, registry: Registry) -> str:
     # Markdown: a blank line after the header then "- " items renders as a real list.
     # The driver's approval view (CLI or Streamlit chat) renders this description as markdown.
     expectations = contract.suite.expectations
-    lines = [f"Data quality contract for '{contract.dataset.name}' — {len(expectations)} "
-             f"check{'s' if len(expectations) != 1 else ''}:", ""]
+    lines = [(f"Data quality contract for '{contract.dataset.name}' — {len(expectations)} "
+              f"check{'s' if len(expectations) != 1 else ''}:"), "",
+             ("If a check marked **error** fails, the pipeline run stops. If a check marked "
+              "**warning** fails, it is recorded and the run still completes."), ""]
+    if all(e.severity == "error" for e in expectations):
+        lines += [("**Every check is set to error**, so any single failure stops the pipeline run. "
+                   "Confirm that is intended, or mark the checks the pipeline can live without as warning."), ""]
     for e in expectations:
-        line = "- " + registry.summarize(e.expectation_type, e.kwargs)
-        if e.meta:
+        line = f"- **{e.severity}**: " + registry.summarize(e.expectation_type, e.kwargs)
+        if e.meta and e.meta.notes:
             line += f" — {e.meta.notes.content}"
         lines.append(line)
     return "\n".join(lines)

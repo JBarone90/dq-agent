@@ -8,14 +8,14 @@ When an owner needs a check no allowed expectation covers, the agent can look th
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel
 
-from dataflow_kit.operators import dq_validation
+from dq_agent import gx_contract
 
 DEFAULT_PROPOSALS_DIR = Path("proposals")
 
@@ -54,23 +54,23 @@ def unlisted_expectations() -> list[UnlistedExpectation]:
             sql_support=_sql_support(name),
         )
         for name in sorted(gx_registry._registered_expectations)
-        if name not in dq_validation.ALLOWED_EXPECTATIONS
+        if name not in gx_contract.ALLOWED_EXPECTATIONS
     ]
 
 
 def proposal_errors(expectation_type: str, example_kwargs: dict[str, Any]) -> list[str]:
     """Why a proposal cannot be written: not a GX expectation, already allowed, or kwargs
     that GX or the data-flow policy would reject."""
-    if expectation_type in dq_validation.ALLOWED_EXPECTATIONS:
+    if expectation_type in gx_contract.ALLOWED_EXPECTATIONS:
         return [f"'{expectation_type}' is already allowed — put it in the contract instead"]
     if expectation_type not in {u.expectation_type for u in unlisted_expectations()}:
         return [f"'{expectation_type}' is not a Great Expectations 0.18.2 expectation"]
-    return dq_validation.kwarg_errors(expectation_type, example_kwargs)
+    return gx_contract.kwarg_errors(expectation_type, example_kwargs)
 
 
 def write_proposal(proposal: Proposal, proposals_dir: Path = DEFAULT_PROPOSALS_DIR) -> Path:
     proposals_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"{date.today().isoformat()}_{proposal.expectation_type}_{proposal.dataset}"
+    stem = f"{proposal.proposed_at.date().isoformat()}_{proposal.expectation_type}_{proposal.dataset}"
     path = proposals_dir / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', stem)}.yaml"
     suffix = 2
     while path.exists():  # never overwrite an earlier proposal
@@ -83,7 +83,7 @@ def write_proposal(proposal: Proposal, proposals_dir: Path = DEFAULT_PROPOSALS_D
 def new_proposal(**fields: Any) -> Proposal:
     name = fields["expectation_type"]
     return Proposal(
-        proposed_at=datetime.now(timezone.utc),
+        proposed_at=datetime.now(UTC),
         gx_description=_first_line(name),
         sql_support=_sql_support(name),
         **fields,

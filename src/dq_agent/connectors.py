@@ -10,7 +10,7 @@ import os
 import re
 from pathlib import Path
 from typing import NamedTuple
-from urllib.parse import quote_plus
+from urllib.parse import quote, urlencode
 
 import polars as pl
 
@@ -30,6 +30,17 @@ def is_valid_table(name: str) -> bool:
     the loaders enforce it before building SQL, and a UI can call it to validate input
     client-side without duplicating the pattern."""
     return bool(_IDENTIFIER.match(name))
+
+
+def quote_table(name: str) -> str:
+    """`name` as a quoted SQL identifier ("schema"."table"), so Postgres matches it with its
+    exact case — as GX does when data-flow runs the contract — rather than folding it to lower
+    case. Validated first: the quoting relies on the name holding no quote character."""
+    if not is_valid_table(name):
+        raise ValueError(f"invalid table name: {name!r}")
+    return ".".join(f'"{part}"' for part in name.split("."))
+
+
 # a custom query must be read-only; reject anything that could mutate, even though the
 # agent never supplies raw SQL — this path is reachable programmatically
 _FORBIDDEN_RE = re.compile(
@@ -65,19 +76,35 @@ def _normalise_postgres_uri(conn_str: str) -> str:
     """Accept either a ready `postgresql://` URI or a libpq DSN (`host=... dbname=...`)
     and return a ConnectorX-compatible URI. The libpq form is parsed with psycopg,
     imported lazily so this module still loads without the `postgres` extra."""
-    if conn_str.startswith("postgresql://") or conn_str.startswith("postgres://"):
+    if conn_str.startswith(("postgresql://", "postgres://")):
         return conn_str
+    d = {key: str(value) for key, value in _parse_libpq_dsn(conn_str).items()}
+    # Anything libpq would default (no password with .pgpass, no host for a socket) is left
+    # out rather than required; the remaining options (sslmode, connect_timeout, ...) ride
+    # along as query parameters.
+    user, password = d.pop("user", None), d.pop("password", None)
+    host, port, dbname = d.pop("host", None), d.pop("port", None), d.pop("dbname", None)
+    auth = ""
+    if user:
+        auth = quote(user, safe="") + (f":{quote(password, safe='')}" if password else "") + "@"
+    netloc = auth + (host or "localhost") + (f":{port}" if port else "")
+    query = f"?{urlencode(d)}" if d else ""
+    return f"postgresql://{netloc}/{quote(dbname or '', safe='')}{query}"
+
+
+def _parse_libpq_dsn(conn_str: str) -> dict[str, object]:
     try:
         from psycopg.conninfo import conninfo_to_dict
-    except ImportError as exc:
-        raise ImportError(
-            "parsing a libpq DSN requires psycopg — install with: uv sync --extra postgres"
-        ) from exc
-    d = conninfo_to_dict(conn_str)
-    return (
-        f"postgresql://{quote_plus(d['user'])}:{quote_plus(d['password'])}"
-        f"@{d['host']}:{d['port']}/{d['dbname']}"
-    )
+    except ImportError:
+        try:
+            from psycopg2.extensions import parse_dsn
+        except ImportError as exc:
+            raise ImportError(
+                "parsing a libpq DSN requires psycopg or psycopg2 — "
+                "install with: uv sync --extra postgres"
+            ) from exc
+        return dict(parse_dsn(conn_str))
+    return dict(conninfo_to_dict(conn_str))
 
 
 def load_csv(path: str | Path) -> pl.DataFrame:
@@ -111,26 +138,26 @@ def load_postgres(
     if (table is None) == (query is None):
         raise ValueError("provide exactly one of 'table' or 'query'")
     if table is not None:
-        if not is_valid_table(table):
-            raise ValueError(f"invalid table name: {table!r}")
-        query = f"SELECT * FROM {table}"
+        sql = f"SELECT * FROM {quote_table(table)}"
         if sample_rows is not None:
-            query += f" ORDER BY random() LIMIT {int(sample_rows)}"
+            sql += f" ORDER BY random() LIMIT {int(sample_rows)}"
     else:
+        assert query is not None  # exactly one of the two, checked above
         if sample_rows is not None:
             raise ValueError("sample_rows applies to 'table', not a custom 'query'")
         # a caller-supplied query is read-only by contract: it must be a SELECT and
         # carry no mutating keyword. The agent never reaches here (it passes table
         # names), but the function is callable directly.
         stripped = query.lstrip().lower()
-        if not (stripped.startswith("select") or stripped.startswith("with")):
+        if not stripped.startswith(("select", "with")):
             raise ValueError("only read-only SELECT queries are allowed")
         if _FORBIDDEN_RE.search(query):
             raise ValueError("query contains a forbidden (mutating) keyword")
+        sql = query
 
     if uri is None:
         uri = resolve_dsn(env_var)
-    return _read(query, uri)
+    return _read(sql, uri)
 
 
 def estimate_row_count(uri: str, table: str) -> int | None:
@@ -139,14 +166,11 @@ def estimate_row_count(uri: str, table: str) -> int | None:
     which scans. Returns None when the planner has no estimate yet (e.g. a table never
     analyzed reports `reltuples = -1`); callers should then sample defensively rather
     than trust a zero."""
-    if not is_valid_table(table):
-        raise ValueError(f"invalid table name: {table!r}")
-    schema, _, name = table.rpartition(".")
-    schema = schema or "public"
+    # to_regclass resolves the name exactly as `SELECT * FROM` does (same quoting, same
+    # search_path for an unqualified name), so the estimate is for the table that gets read
     query = (
         "SELECT c.reltuples::bigint AS estimate FROM pg_class c "
-        "JOIN pg_namespace n ON n.oid = c.relnamespace "
-        f"WHERE c.relname = '{name}' AND n.nspname = '{schema}' "
+        f"WHERE c.oid = to_regclass('{quote_table(table)}') "
         "AND c.relkind IN ('r', 'p', 'm')"
     )
     result = _read(query, uri)
@@ -188,12 +212,12 @@ def load_postgres_profiling(
     if estimate is not None:
         pct = min(100.0, max(_MIN_SAMPLE_PCT, max_rows / estimate * 100.0 * _SAMPLE_OVERSHOOT))
         query = (
-            f"SELECT * FROM {table} TABLESAMPLE SYSTEM ({pct:.6f}) "
+            f"SELECT * FROM {quote_table(table)} TABLESAMPLE SYSTEM ({pct:.6f}) "
             f"REPEATABLE ({int(seed)}) LIMIT {int(max_rows)}"
         )
     else:
         # no estimate: bound the transfer without a scan; biased toward stored order
-        query = f"SELECT * FROM {table} LIMIT {int(max_rows)}"
+        query = f"SELECT * FROM {quote_table(table)} LIMIT {int(max_rows)}"
 
     return ProfilingLoad(_read(query, uri), sampled=True, estimated_rows=estimate)
 
@@ -210,11 +234,9 @@ def column_bounds(uri: str, table: str, column: str) -> tuple[object, object]:
     forces a full scan). So this is the one to call before locking a range bound on a
     table large enough to have been sampled. Returns ``(None, None)`` for an empty or
     all-null column."""
-    if not is_valid_table(table):
-        raise ValueError(f"invalid table name: {table!r}")
     if not _COLUMN.match(column):
         raise ValueError(f"invalid column name: {column!r}")
-    query = f"SELECT min({column}) AS lo, max({column}) AS hi FROM {table}"
+    query = f'SELECT min("{column}") AS lo, max("{column}") AS hi FROM {quote_table(table)}'
     result = _read(query, uri)
     if result.is_empty():
         return None, None

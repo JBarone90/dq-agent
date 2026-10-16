@@ -1,0 +1,41 @@
+# Example contract: the synthetic orders dataset (data/synthetic/orders.csv) as dq-agent writes it.
+# Contracts the agent approves land next to this folder as contracts/<schema>.<table>.yaml.
+# meta.severity says what a failure does: error stops the run, warning is recorded and the run
+# completes. An expectation without one is an error.
+contract_version: 1
+gx_version: "0.18.2"
+dataset:
+  schema: synthetic
+  table: orders
+approval:
+  approved_at: 2026-10-08T00:00:00Z
+  approved_by: jacopo
+suite:
+  name: synthetic.orders
+  expectations:
+    - expectation_type: expect_table_row_count_to_be_between
+      kwargs: {min_value: 10}
+      meta: {severity: warning}
+    - expectation_type: expect_column_values_to_not_be_null
+      kwargs: {column: customer_id}
+      meta:
+        severity: error
+        notes: {format: string, content: Every order must belong to a customer}
+    - expectation_type: expect_column_values_to_be_unique
+      kwargs: {column: order_id}
+      meta: {severity: error}
+    - expectation_type: expect_column_values_to_be_between
+      kwargs: {column: amount, min_value: 0}
+      meta: {severity: error}
+    - expectation_type: expect_column_values_to_be_in_set
+      kwargs: {column: status, value_set: [shipped, delivered, pending, cancelled]}
+      meta: {severity: error}
+    - expectation_type: expect_column_values_to_match_regex
+      kwargs: {column: email, regex: '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'}
+      meta: {severity: warning}
+    - expectation_type: expect_column_max_to_be_between # freshness: the newest order is under a year old
+      kwargs: {column: created_at, min_value: {$PARAMETER: now() - timedelta(days=365)}}
+      meta: {severity: warning}
+    - expectation_type: expect_column_min_to_be_between # stale rows: no order is over three years old
+      kwargs: {column: created_at, min_value: {$PARAMETER: now() - timedelta(days=1095)}}
+      meta: {severity: warning}

@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime, timezone
+from datetime import UTC, date, datetime
+from typing import cast
 
 import polars as pl
 from pydantic import BaseModel
@@ -112,7 +113,7 @@ def profile(
 
     return ProfileReport(
         dataset=dataset,
-        profiled_at=profiled_at or datetime.now(timezone.utc),
+        profiled_at=profiled_at or datetime.now(UTC),
         sampled=sampled,
         table=TableProfile(
             row_count=row_count,
@@ -169,19 +170,21 @@ def _profile_column(s: pl.Series, row_count: int, hint_s: pl.Series) -> ColumnPr
     if len(non_null) == 0:
         return profile
 
+    # polars types a Series' scalars as any value a column can hold; the dtype checks
+    # here are what narrow them
     if s.dtype.is_numeric():
-        profile.min = non_null.min()
-        profile.max = non_null.max()
+        profile.min = cast(float | int, non_null.min())
+        profile.max = cast(float | int, non_null.max())
         profile.numeric = NumericSummary(
-            mean=non_null.mean(),
-            std=non_null.std(),
+            mean=cast(float, non_null.mean()),
+            std=cast(float, non_null.std()),
             p25=non_null.quantile(0.25),
             p50=non_null.quantile(0.5),
             p75=non_null.quantile(0.75),
         )
     elif s.dtype.is_temporal():
-        profile.min = non_null.min().isoformat()
-        profile.max = non_null.max().isoformat()
+        profile.min = cast(date, non_null.min()).isoformat()
+        profile.max = cast(date, non_null.max()).isoformat()
 
     return profile
 
@@ -198,20 +201,35 @@ def _semantic_hint(s: pl.Series) -> str | None:
     if len(non_null) == 0:
         return None
 
-    if non_null.str.contains(EMAIL_PATTERN).mean() >= HINT_MATCH_THRESHOLD:
+    if _match_rate(non_null, EMAIL_PATTERN) >= HINT_MATCH_THRESHOLD:
         return "email"
     # date before phone: ISO date strings also match the loose phone pattern,
     # but phone numbers never parse as dates
-    if _date_parse_rate(non_null) >= HINT_MATCH_THRESHOLD:
+    if (
+        _date_parse_rate(non_null) >= HINT_MATCH_THRESHOLD
+        or _datetime_parse_rate(non_null) >= HINT_MATCH_THRESHOLD
+    ):
         return "date"
-    if non_null.str.contains(PHONE_PATTERN).mean() >= HINT_MATCH_THRESHOLD:
+    if _match_rate(non_null, PHONE_PATTERN) >= HINT_MATCH_THRESHOLD:
         return "phone"
     return None
+
+
+def _match_rate(non_null: pl.Series, pattern: str) -> float:
+    return cast(float, non_null.str.contains(pattern).mean())
 
 
 def _date_parse_rate(non_null: pl.Series) -> float:
     try:
         parsed = non_null.str.to_date(strict=False)
+    except pl.exceptions.PolarsError:
+        return 0.0
+    return 1.0 - parsed.null_count() / len(non_null)
+
+
+def _datetime_parse_rate(non_null: pl.Series) -> float:
+    try:
+        parsed = non_null.str.to_datetime(strict=False)
     except pl.exceptions.PolarsError:
         return 0.0
     return 1.0 - parsed.null_count() / len(non_null)
@@ -232,13 +250,18 @@ def _infer_string_dtype(s: pl.Series) -> tuple[str, float] | None:
         rate = _cast_rate(non_null, dtype)
         if rate >= HINT_MATCH_THRESHOLD:
             return str(dtype), rate
+
     date_rate = _date_parse_rate(non_null)
     if date_rate >= HINT_MATCH_THRESHOLD:
         return "Date", date_rate
+
+    datetime_rate = _datetime_parse_rate(non_null)
+    if datetime_rate >= HINT_MATCH_THRESHOLD:
+        return "Datetime", datetime_rate
     return None
 
 
-def _cast_rate(non_null: pl.Series, dtype: pl.DataType) -> float:
+def _cast_rate(non_null: pl.Series, dtype: pl.DataType | type[pl.DataType]) -> float:
     """Fraction of non-null values that survive a non-strict cast to `dtype` (values
     that do not parse become null)."""
     try:

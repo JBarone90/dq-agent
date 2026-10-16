@@ -1,21 +1,10 @@
-"""Streamlit chat interface for the scoping agent — the non-coder-facing driver.
+"""Streamlit chat interface for the scoping agent: the non-coder-facing driver.
 
-This is the visual counterpart to `scripts/scoping_cli.py`: same in-process graph,
-same checkpointer, same interrupt/resume contract — rendered as a chat panel a
-dataset owner can use without a terminal. It mirrors the parts of agent-chat-ui that
-matter here, plus a few extras:
-
-  - a chat transcript with the agent;
-  - **visible tool calls** with a sidebar **toggle** to show/hide them;
-  - **profile-at-a-glance** — the `profile_dataset` result renders as a stats table,
-    not raw JSON;
-  - the human approval gate as approve / edit / reject controls, with **edit**
-    exposing the contract YAML before approval;
-  - **resumable threads** — conversations persist in a local SQLite checkpoint store,
-    so a closed tab can be reopened and continued;
-  - **token-usage**, a dev **session-cost** readout (per-call `x-cost` headers), the
-    account **daily budget** (`bedrock.get_usage()`, cached), and a one-click
-    **download** of the approved contract YAML.
+The visual counterpart to `scripts/scoping_cli.py`: same in-process graph, checkpointer
+and interrupt/resume contract, rendered as a chat panel. It shows the transcript with an
+optional view of tool calls, the profile as a stats table, the approval gate as
+approve / edit / reject controls, resumable threads (a local SQLite checkpoint store),
+token usage, and a download of the approved contract YAML.
 
 The graph and its SQLite connection are shared across sessions via `st.cache_resource`
 (`_resources`); only per-conversation state lives in `st.session_state`.
@@ -23,16 +12,14 @@ The graph and its SQLite connection are shared across sessions via `st.cache_res
 Run from the repo root (needs the work environment for the Bedrock proxy to answer):
 
     uv run --extra ui streamlit run app/scoping_app.py
-
-Not yet wired: token streaming — the Bedrock adapter has no `_stream` (see the
-DeptBedrockChat limitations docstring).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
-import re
 import os
+import re
 import sqlite3
 import uuid
 from pathlib import Path
@@ -47,10 +34,10 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.types import Command
 
 from dq_agent.agents.bedrock_chat import BedrockProxyError
-from dq_agent.agents.scoping import build_graph
+from dq_agent.agents.gate import pending_interrupt, resume
+from dq_agent.agents.scoping import DEFAULT_DATA_DIR, build_graph
 from dq_agent.connectors import DEFAULT_DSN_ENV, is_valid_table
 from dq_agent.models import Contract
 
@@ -65,15 +52,10 @@ DB_PATH = "scoping_threads.sqlite"
 
 @st.cache_resource
 def _resources() -> tuple[Any, sqlite3.Connection]:
-    """The graph and its checkpoint connection — process-global, built once and shared
-    across sessions and reruns. This is exactly the `cache_resource` use case:
-    compiling the graph (registry scan, model init) and opening the SQLite connection
-    are expensive and safe to share. Per-conversation state (thread_id, transcript)
-    stays in session_state, so users remain isolated by thread_id on the shared store.
-
-    check_same_thread=False: a cached connection is reused across Streamlit's worker
-    threads. SQLite serializes writes; for many concurrent writers, move to a
-    PostgresSaver."""
+    """The compiled graph and its SQLite connection, shared across sessions and reruns.
+    Per-conversation state stays in session_state, keyed by thread_id on the shared store.
+    check_same_thread=False because Streamlit reuses the connection across worker threads;
+    move to a PostgresSaver for many concurrent writers."""
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     checkpointer = SqliteSaver(conn)
     checkpointer.setup()  # create the checkpoint tables up front so reads don't race
@@ -89,15 +71,6 @@ def _init_state() -> None:
 
 def _config() -> dict[str, Any]:
     return {"configurable": {"thread_id": st.session_state.thread_id}}
-
-
-def _pending_interrupt(result: dict[str, Any] | None) -> dict[str, Any] | None:
-    """The approval-gate payload if the graph is paused, else None."""
-    pending = (result or {}).get("__interrupt__")
-    if not pending:
-        return None
-    item = pending[0] if isinstance(pending, (list, tuple)) else pending
-    return getattr(item, "value", item)
 
 
 def _known_threads() -> list[str]:
@@ -134,70 +107,6 @@ def _token_usage(result: dict[str, Any] | None) -> tuple[int, int]:
             inp += usage.get("input_tokens", 0)
             out += usage.get("output_tokens", 0)
     return inp, out
-
-
-def _cache_usage(result: dict[str, Any] | None) -> tuple[int, int] | None:
-    """Prompt-cache tokens (read, write) summed across the transcript, or None when
-    no message reports them.
-
-    None keeps the metric hidden rather than showing a misleading 0/0 when the proxy
-    is not reporting cache counts at all. A real 0/0 is meaningful and does render:
-    it means the counts came through and nothing was cached, which is the expected
-    reading until the adapter starts setting cache points."""
-    read = write = 0
-    seen = False
-    for msg in (result or {}).get("messages", []):
-        details = (getattr(msg, "usage_metadata", None) or {}).get(
-            "input_token_details"
-        )
-        if details:
-            read += details.get("cache_read", 0)
-            write += details.get("cache_creation", 0)
-            seen = True
-    return (read, write) if seen else None
-
-
-def _session_cost(
-    result: dict[str, Any] | None,
-) -> tuple[float, bool, bool] | None:
-    """Total $ across the transcript, as (total, complete, computed).
-
-    `complete` is False when some assistant turn carried no cost at all, so the total
-    is a floor rather than the bill; that happens when the pricing lookup is
-    unavailable. `computed` is True when any turn was priced locally instead of from
-    the proxy's `x-cost` header, which is how a streamed turn is priced: a stream's
-    headers are sent before any token exists, so the proxy cannot put a final cost on
-    them. None when nothing carries a cost, so the metric hides rather than showing a
-    wrong $0."""
-    total = 0.0
-    computed = 0
-    priced = unpriced = 0
-    for msg in (result or {}).get("messages", []):
-        if not isinstance(msg, AIMessage):
-            continue
-        meta = getattr(msg, "response_metadata", None) or {}
-        if "cost_usd" in meta:
-            total += meta["cost_usd"]
-            priced += 1
-            if meta.get("cost_source") == "computed":
-                computed += 1
-        else:
-            unpriced += 1
-    if not priced:
-        return None
-    return total, unpriced == 0, computed > 0
-
-
-@st.cache_data(ttl=60, show_spinner=False)
-def _daily_usage() -> dict[str, str] | None:
-    """Account-level Bedrock daily budget via `dwutils.bedrock.get_usage()`. Cached for
-    a minute (st.cache_data) so it is not re-fetched on every rerun; None off-network."""
-    try:
-        from dwutils import bedrock
-
-        return bedrock.get_usage()
-    except Exception:
-        return None
 
 
 # --- transcript rendering ------------------------------------------------
@@ -316,30 +225,18 @@ def _render_transcript(result: dict[str, Any] | None, show_tools: bool) -> None:
 
 
 def _agent_tokens(graph: Any, graph_input: Any) -> Any:
-    """Yield assistant text as the graph produces it, for `st.write_stream`.
-
-    `stream_mode="messages"` emits (chunk, metadata) for every token the model
-    produces. Only the assistant's prose is yielded: tool-call chunks carry partial
-    JSON arguments, which are for the graph to assemble, not for a reader to watch.
-    The transcript is still rendered from checkpointed state afterwards, so this only
-    controls what the current turn looks like while it is in flight."""
+    """Yield assistant prose as the graph produces it, for `st.write_stream`. Tool-call
+    chunks (partial JSON) are skipped; the transcript is re-rendered from state afterwards."""
     for chunk, _meta in graph.stream(graph_input, _config(), stream_mode="messages"):
-        if isinstance(chunk, AIMessageChunk) and isinstance(chunk.content, str):
-            if chunk.content:
-                yield chunk.content
+        if isinstance(chunk, AIMessageChunk) and isinstance(chunk.content, str) and chunk.content:
+            yield chunk.content
 
 
 def _invoke(graph_input: Any) -> None:
-    """Advance the graph and store the result, or render a clear error and stop.
-
-    A bedrock-proxy failure (bad token, model_id, or proxy URL) raises BedrockProxyError;
-    catch it so the user sees the diagnostic message in the UI instead of Streamlit's raw
-    traceback box, and the existing transcript stays put for a retry. Streamed turns
-    raise the same type, including when the failure starts mid-stream.
-
-    After streaming, state is reloaded from the checkpointer rather than taken from a
-    return value: `graph.stream` yields message chunks, and a pending approval gate
-    only shows up in the persisted snapshot."""
+    """Advance the graph and store the result, or show a BedrockProxyError (also raised
+    mid-stream) in the UI instead of a traceback, leaving the transcript for a retry.
+    After streaming, state is reloaded from the checkpointer: a pending approval gate
+    only appears in the persisted snapshot."""
     graph, _ = _resources()
     try:
         if st.session_state.get("stream_responses", True):
@@ -357,19 +254,23 @@ def _invoke(graph_input: Any) -> None:
 
 
 def _resume(decision: dict[str, Any]) -> None:
-    _invoke(Command(resume={"decisions": [decision]}))
+    _invoke(resume(decision))
 
 
 def _draft_yaml(draft: dict[str, Any]) -> str:
     try:
         return Contract.model_validate(draft).to_yaml()
-    except Exception:
+    except ValueError:  # pydantic's ValidationError: show the draft as it is
         return yaml.safe_dump(draft, sort_keys=False)
 
 
 def _render_gate(payload: dict[str, Any]) -> None:
     request = (payload.get("action_requests") or [{}])[0]
     draft = request.get("args", {}).get("contract", {})
+    # Keyed to this draft: a keyed widget keeps what it holds across reruns even when its
+    # value= changes, so a fixed key would leave a revised draft's editor showing the old
+    # YAML, and approving the edit would approve the old contract.
+    draft_key = hashlib.sha256(json.dumps(draft, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
     st.divider()
     st.subheader("Approval requested")
@@ -382,7 +283,7 @@ def _render_gate(payload: dict[str, Any]) -> None:
         st.session_state.gate_requesting_changes = True
 
     if st.session_state.get("gate_requesting_changes"):
-        feedback = st.text_area("What should change?", key="gate_feedback")
+        feedback = st.text_area("What should change?", key=f"gate_feedback_{draft_key}")
         send_col, cancel_col = st.columns(2)
         if send_col.button("Send", type="primary", use_container_width=True):
             st.session_state.gate_requesting_changes = False
@@ -393,7 +294,7 @@ def _render_gate(payload: dict[str, Any]) -> None:
 
     with st.expander("✏️ Edit the contract directly, then approve"):
         edited_yaml = st.text_area(
-            "Contract YAML", value=_draft_yaml(draft), height=320, key="gate_edit_yaml"
+            "Contract YAML", value=_draft_yaml(draft), height=320, key=f"gate_edit_yaml_{draft_key}"
         )
         if st.button("Approve edited contract"):
             try:
@@ -421,7 +322,7 @@ def _sidebar(result: dict[str, Any] | None) -> bool:
             "Stream responses",
             value=True,
             key="stream_responses",
-            help="Render the reply as it is produced. Streamed turns report no cost.",
+            help="Render the reply as it is produced.",
         )
         st.toggle(
             "Plain-text code blocks",
@@ -438,38 +339,6 @@ def _sidebar(result: dict[str, Any] | None) -> bool:
         st.metric("Tokens (in / out)", f"{inp} / {out}")
         st.caption("Summed from the Bedrock response usage.")
 
-        cache = _cache_usage(result)
-        if cache is not None:
-            cache_read, cache_write = cache
-            st.metric("Cache tokens (read / write)", f"{cache_read} / {cache_write}")
-            st.caption(
-                "Prompt-cache tokens reported by the proxy. Zero until the request "
-                "sets cache points."
-            )
-
-        cost = _session_cost(result)
-        if cost is not None:
-            spend, complete, computed = cost
-            st.metric(
-                "Session cost (dev)",
-                f"${spend:.4f}" if complete else f">= ${spend:.4f}",
-            )
-            if not complete:
-                st.caption(
-                    "A floor, not the total: some turns could not be priced."
-                )
-            elif computed:
-                st.caption(
-                    "Streamed turns are priced from the proxy's published rates, not "
-                    "its per-call cost header."
-                )
-
-        usage = _daily_usage()
-        if usage:
-            st.divider()
-            st.caption("Bedrock daily budget")
-            st.write(f"{usage['Current Daily Used']} of {usage['Daily Limit']} used")
-            st.caption(f"{usage['Daily Usage Remaining']} remaining")
 
         st.divider()
         threads = [t for t in _known_threads() if t != st.session_state.thread_id]
@@ -494,6 +363,8 @@ def _validate_path(path: str) -> tuple[bool, str]:
     p = Path(path)
     if p.suffix.lower() not in _FILE_SUFFIXES:
         return False, "Path must end in .csv or .parquet."
+    if not p.resolve().is_relative_to(DEFAULT_DATA_DIR.resolve()):
+        return False, f"The file must be under `{DEFAULT_DATA_DIR}/`."
     if not p.exists():
         return False, "No file at that path (relative to where the app runs)."
     return True, ""
@@ -512,7 +383,7 @@ def _source_entry() -> None:
     if kind.startswith("File"):
         path = st.text_input(
             "File path", placeholder="data/synthetic/orders.csv",
-            help="A CSV or Parquet file readable by the app.",
+            help=f"A CSV or Parquet file under `{DEFAULT_DATA_DIR}/`.",
         ).strip()
         valid, message = _validate_path(path)
         first_message = f"Please scope the dataset at {path}"
@@ -551,7 +422,7 @@ def main() -> None:
     if contract_path:
         st.success(f"Contract approved and saved to `{contract_path}`")
         try:
-            yaml_text = Path(contract_path).read_text()
+            yaml_text = Path(contract_path).read_text(encoding="utf-8")
             st.download_button(
                 "⬇️ Download contract YAML",
                 yaml_text,
@@ -562,7 +433,7 @@ def main() -> None:
             pass
         return
 
-    payload = _pending_interrupt(result)
+    payload = pending_interrupt(result)
     if payload is not None:
         _render_gate(payload)
         return
