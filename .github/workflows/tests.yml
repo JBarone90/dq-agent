@@ -11,7 +11,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.13"]
+
+    services:
+      # a scratch database for tests/test_postgres.py, which creates and drops its own schema
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: dq
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
 
     steps:
       - uses: actions/checkout@v4
@@ -23,10 +33,12 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --extra dev --extra agents
+        # dwutils is internal and the first package mirror needs work credentials
+        run: uv sync --locked --all-extras --no-install-package dwutils --index-strategy unsafe-best-match
 
       - name: Run tests
-        # integration tests are deselected (never collected) so CI never makes a live
-        # LLM call even if DQ_AGENT_MODEL leaks into the environment; the Postgres test
-        # still self-skips without DQ_TEST_POSTGRES_URI
-        run: uv run pytest -m "not integration" --cov=src/dq_agent
+        # integration tests (live proxy calls) are deselected, so CI never calls the proxy even
+        # if its variables leak into the environment
+        env:
+          DQ_TEST_POSTGRES_URI: postgresql://postgres:dq@localhost:5432/postgres
+        run: uv run --no-sync pytest tests tests_kit -m "not integration" --cov

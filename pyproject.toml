@@ -1,58 +1,88 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "dq-agent"
 version = "0.1.0"
 description = "Conversational data quality framework with a curated rule registry and deterministic execution engine"
-requires-python = ">=3.11"
+readme = "README.md"
+requires-python = ">=3.13"
 dependencies = [
+    "dwutils>=0.7.6",
+    "orjson>=3.10",
     "polars>=1.0.0",
     "pydantic>=2.0.0",
     "pyyaml>=6.0",
+    "requests>=2.34.2",
+    "requests-toolbelt>=1.0.0",
 ]
 
 [project.optional-dependencies]
 postgres = [
     "connectorx>=0.3.0",
-    "psycopg2-binary>=2.9",
+    "psycopg[binary]>=3.3.4",
+    "psycopg2-binary>=2.9",  # GX 0.18.2 on SQLAlchemy 1.4 (as in data-flow) uses the psycopg2 driver
+    "sqlalchemy>=1.4,<2",     # GX 0.18.2 does not support SQLAlchemy 2
     "pyarrow>=15.0.0",  # connectorx hands results to polars as Arrow tables
-    "sqlalchemy>=1.4,<2",
 ]
 agents = [
-    "great-expectations==0.18.2",
-    "langchain>=0.3.0",                # init_chat_model: provider is a config string, not code
+    "great-expectations==0.18.2",  # the version data-flow runs
+    "langchain>=0.3.0",                
     "langchain-core>=0.3.0",
     "langgraph>=0.2.0",
-    "langgraph-checkpoint-sqlite>=2.0.0",  # durable thread state for the CLI/Streamlit driver
-    # NB (feat/bedrock-proxy-adapter): this branch is air-gapped with no npm mirror, so the
-    # agent-chat-ui demo path is dropped. The interface is a local in-process driver instead:
-    # the CLI in `scripts/scoping_cli.py` (optionally a Streamlit chat panel), each of which
-    # compiles the graph with its own checkpointer. `langgraph-cli` (the `langgraph dev`
-    # server) is therefore not a dependency here.
-    # NB: this branch's default model is DeptBedrockChat, which calls the internal
-    # `dwutils.bedrock` proxy. `dwutils` is an internal package, not on PyPI, so it is NOT
-    # listed here — it is expected to be importable in the work environment.
-    # langchain-google-genai is dropped (no Gemini path on this branch).
-]
-ui = [
-    "streamlit>=1.40",  # chat panel for the scoping agent (app/scoping_app.py); npm-free
-]
-notebook = [
-    "ipykernel>=6.0",   # registers .venv as the "dq-agent" kernel (notebooks/try_contract.ipynb)
-    "jupyterlab>=4.0",
-]
-dev = [
-    "pytest>=8.0.0",
-    "pytest-cov>=5.0.0",
+    "langgraph-checkpoint-sqlite>=2.0.0",
 ]
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+ui = [
+    "streamlit>=1.40",
+]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/dq_agent", "dataflow_kit"]
+packages = ["src/dq_agent"]
 
 [tool.pytest.ini_options]
+pythonpath = ["src"]
 testpaths = ["tests"]
+filterwarnings = [
+    # upstream great_expectations deprecations, not actionable from this repo
+    "ignore:.*deprecated - use.*:Warning:great_expectations\\..*",
+    "ignore:`Number` field should not be instantiated.*:Warning:great_expectations\\..*",
+    # GX 0.18.2's evaluation-parameter parser uses a pyparsing argument pyparsing now deprecates
+    "ignore:'parseAll' argument is deprecated:Warning",
+]
 markers = [
     "integration: live LLM call — requires DQ_AGENT_MODEL env var (deselected by default)",
+]
+
+[tool.mypy]
+files = ["src"]
+
+[[tool.mypy.overrides]]
+# no type information: GX 0.18.2, the internal dwutils, and psycopg2 (only a DSN-parsing fallback)
+module = ["great_expectations.*", "dwutils.*", "psycopg2.*"]
+ignore_missing_imports = true
+
+[[tool.uv.index]]
+url = "https://s3.eu-west-2.amazonaws.com/jupyter.notebook.uktrade.io/shared/ddat_packages/pypi"
+
+[[tool.uv.index]]
+url = "https://s3.eu-west-2.amazonaws.com/jupyter.notebook.uktrade.io/shared/ag_packages/pypi"
+
+[[tool.uv.index]]
+url = "https://s3-eu-west-2.amazonaws.com/mirrors.notebook.uktrade.io/pytorch/"
+
+[[tool.uv.index]]
+url = "https://s3-eu-west-2.amazonaws.com/mirrors.notebook.uktrade.io/pypi/"
+default = true
+
+[dependency-groups]
+dev = [
+    "black>=26.5.1",
+    "ipykernel>=7.3.0",
+    "mypy>=2.1.0",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.15.18",
+    "types-pyyaml>=6.0.12.20260906",
 ]
