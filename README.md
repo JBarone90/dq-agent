@@ -76,7 +76,7 @@ The profiler informs which expectations to _propose_; Great Expectations _execut
 
 ## Quickstart
 
-**Requirements:** Python ≥ 3.13 and [uv](https://docs.astral.sh/uv/). `pyproject.toml` and `uv.lock` target the work environment (its package mirrors and the internal `dwutils`); elsewhere, sync with `uv sync --all-extras --no-install-package dwutils --index-strategy unsafe-best-match` and run with `uv run --no-sync`.
+**Requirements:** Python ≥ 3.13 and [uv](https://docs.astral.sh/uv/). `pyproject.toml` and `uv.lock` target the work environment (its package mirrors); elsewhere, sync with `uv sync --all-extras --index-strategy unsafe-best-match` and run with `uv run --no-sync`.
 
 ```bash
 uv sync --extra agents
@@ -105,8 +105,8 @@ data-flow enforces the gate at run time: its loader rejects a contract without a
 > **Branch note (`feat/bedrock-proxy-adapter`).** This branch targets an air-gapped work
 > environment with no npm mirror, so it does **not** use agent-chat-ui or a `langgraph dev`
 > server. The interface is a local, in-process driver instead: a terminal CLI today, and an
-> optional Streamlit chat panel for non-technical owners. The default model is the internal
-> Bedrock proxy (`DeptBedrockChat`), not Gemini.
+> optional Streamlit chat panel for non-technical owners. The default model is Claude through
+> the department's bedrock-proxy, not Gemini.
 
 **1. Install the agent extra.**
 
@@ -114,7 +114,7 @@ data-flow enforces the gate at run time: its loader rejects a contract without a
 uv sync --extra agents
 ```
 
-The default model is `DeptBedrockChat` (`src/dq_agent/agents/bedrock_chat.py`), which reaches Anthropic-on-Bedrock through the internal `dwutils.bedrock` proxy — no API key, no internet. `dwutils` is an internal package assumed importable in the work environment; set `DQ_AGENT_MODEL` to pick a Bedrock model id (defaults to `eu.anthropic.claude-sonnet-5`). The `model` argument to `build_graph` stays injectable, so a different LangChain model can be substituted in tests or off-network experiments without code changes.
+The default model is LangChain's `ChatAnthropic` (built in `src/dq_agent/agents/llm.py`), pointed at the department's bedrock-proxy, which serves the Anthropic Messages API — no internet needed. It reads `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`, both already set in the work tool environments. Set `DQ_AGENT_MODEL` to pick a model id from the proxy's `/anthropic/v1/models` (defaults to `eu.anthropic.claude-sonnet-5-5`), and `DQ_AGENT_PROMPT_CACHE=0` to turn prompt caching off. The `model` argument to `build_graph` stays injectable, so a different LangChain model can be substituted in tests or off-network experiments without code changes. See [BEDROCK_PROXY.md](BEDROCK_PROXY.md) for how the proxy behaves.
 
 **2. Run the CLI.** From the repo root:
 
@@ -277,9 +277,9 @@ Install the optional dependency groups you need:
 
 | Command                    | Adds                                                    |
 | -------------------------- | ------------------------------------------------------- |
-| `uv sync`                  | core: Polars, Pydantic, PyYAML, `dwutils`, plus the `dev` group (pytest, pytest-cov, ruff, black, mypy, ipykernel) |
+| `uv sync`                  | core: Polars, Pydantic, PyYAML, plus the `dev` group (pytest, pytest-cov, ruff, black, mypy, ipykernel) |
 | `uv sync --extra postgres` | ConnectorX (Postgres connector), psycopg, SQLAlchemy 1.4 + psycopg2 (GX's Postgres driver) |
-| `uv sync --extra agents`   | LangGraph + LangChain + SQLite checkpointer + Great Expectations 0.18.2 (the scoping agent, CLI driver and contract validation) |
+| `uv sync --extra agents`   | LangGraph + LangChain + `langchain-anthropic` + SQLite checkpointer + Great Expectations 0.18.2 (the scoping agent, CLI driver and contract validation) |
 | `uv sync --extra ui`       | Streamlit (the chat app) |
 
 Run the suite:
@@ -297,18 +297,18 @@ Every test module skips cleanly when what it needs is missing, so the suite runs
 | `test_gx_contract.py` | `agents` | the allowlist and policy on a corpus of ~55 contracts (each with its expected verdict), loading files, severity on real GX runs (pandas, and SQL through SQLite), freshness vs stale rows |
 | `test_models.py`, `test_registry.py`, `test_report.py`, `test_proposals.py` | `agents` | the contract model, the catalogue built from GX, the approval card, creative mode |
 | `test_agents.py`, `test_gate.py` | `agents` | every tool, the approval gate (approve / edit / reject, every resume shape, reopening a saved thread), range-bound confirmation |
-| `test_bedrock_chat.py` | `agents` | the Bedrock adapter against a stand-in `dwutils`: request shape, tool calls, streaming, caching, usage, error hints |
+| `test_llm.py` | `agents` | the default model's wiring: proxy URL and token, automatic caching with a 1h TTL, the error off the work network |
 | `test_cli.py`, `test_app.py` | `agents` (+ `ui`) | both drivers end to end with a scripted model; the app runs headless through Streamlit's `AppTest` |
 | `test_profiler.py`, `test_connectors.py` | core (+ `postgres`) | profiling, redaction, loaders and SQL building, DSN parsing |
 | `test_postgres.py` | `agents`, `postgres`, `DQ_TEST_POSTGRES_URI` | a real Postgres: the known issues found, Postgres regex, both `$PARAMETER` date forms, the type names GX accepts, the newer expectations, profiling a table through the agent's tool |
-| `test_live_bedrock.py` | `agents`, `dwutils`, `BEDROCK_PROXY_URL` / `BEDROCK_TOKEN` | the live proxy: a plain call, tool calling, a round trip, streaming, prompt caching, and one scoping session from profile to approved contract. Marked `integration` |
+| `test_live_proxy.py` | `agents`, `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` | the live proxy: a plain call, tool calling, a round trip, streaming, prompt caching, and one scoping session from profile to approved contract. Marked `integration` |
 
 Nothing under `tests/` touches the network or the data-flow kit: the suite runs offline (Great Expectations' usage statistics are switched off in `tests/conftest.py`). Two markers separate what needs more than the repo:
 
 ```bash
 uv run pytest -m "not postgres and not integration"   # the repo alone, offline
 uv run pytest -m postgres                              # where DQ_TEST_POSTGRES_URI reaches a database
-uv run pytest -m integration                           # where the Bedrock proxy is reachable
+uv run pytest -m integration                           # where the bedrock-proxy is reachable
 ```
 
 Without their environment variables the `postgres` and `integration` tests skip, so a plain `uv run pytest` is safe anywhere.
@@ -318,7 +318,7 @@ Without their environment variables the `postgres` and `integration` tests skip,
 ```bash
 # a database where you may create a schema: the tests create dq_agent_test_<random> and drop it
 DQ_TEST_POSTGRES_URI=postgresql://user:pass@host:5432/dbname uv run pytest tests/test_postgres.py -v
-# the live proxy (costs a little budget): BEDROCK_PROXY_URL / BEDROCK_TOKEN are usually already set
+# the live proxy (costs a little budget): ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN are usually already set
 uv run pytest -m integration -v
 ```
 

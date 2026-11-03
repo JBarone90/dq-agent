@@ -10,13 +10,12 @@ pytest.importorskip("langgraph")
 pytest.importorskip("great_expectations")
 
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langchain_core.outputs import ChatGenerationChunk
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 import dq_agent.connectors as connectors
-from dq_agent.agents import bedrock_chat
-from dq_agent.agents.bedrock_chat import DeptBedrockChat
 from dq_agent.agents.gate import pending_interrupt, saved_result
 from dq_agent.agents.scoping import ProposedExpectation, _make_tools, build_graph
 from dq_agent.connectors import ProfilingLoad
@@ -525,29 +524,23 @@ def test_edit_for_a_different_table_is_refused(tmp_path, registry, synthetic_dat
     assert "targets a different table" in result["messages"][-2].content
 
 
-def _converse_tool_stream(name, args, call_id):
-    """Raw Converse stream events for one turn that calls a single tool.
+class StreamingScriptedModel(ScriptedModel):
+    """Streams each scripted message as one chunk, tool calls as partial-JSON chunks: the
+    shape a streaming chat model hands LangGraph (the stock fake cannot stream a message
+    that is only tool calls)."""
 
-    Written at the wire level on purpose: this drives the real DeptBedrockChat._stream
-    rather than a LangChain fake, because the streamed tool-call path (partial JSON
-    arguments reassembled across deltas) is ours to get right, not LangChain's."""
-    return [
-        {"messageStart": {"role": "assistant"}},
-        {"contentBlockStart": {
-            "start": {"toolUse": {"toolUseId": call_id, "name": name}},
-            "contentBlockIndex": 0,
-        }},
-        {"contentBlockDelta": {
-            "delta": {"toolUse": {"input": json.dumps(args)}},
-            "contentBlockIndex": 0,
-        }},
-        {"contentBlockStop": {"contentBlockIndex": 0}},
-        {"messageStop": {"stopReason": "tool_use"}},
-    ]
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        message = next(self.messages)
+        yield ChatGenerationChunk(message=AIMessageChunk(
+            content=message.content,
+            tool_call_chunks=[{"name": c["name"], "args": json.dumps(c["args"]), "id": c["id"],
+                               "index": i, "type": "tool_call_chunk"}
+                              for i, c in enumerate(message.tool_calls)],
+        ))
 
 
 def test_streamed_run_still_pauses_on_the_approval_interrupt(
-    tmp_path, registry, synthetic_data_path, monkeypatch
+    tmp_path, registry, synthetic_data_path
 ):
     """A driver that streams must still find the approval gate.
 
@@ -558,18 +551,17 @@ def test_streamed_run_still_pauses_on_the_approval_interrupt(
     """
     csv = str(synthetic_data_path / "orders.csv")
     turns = iter([
-        _converse_tool_stream("profile_dataset", {"path": csv}, "c1"),
-        _converse_tool_stream(
+        AIMessage("", tool_calls=[_tool_call("profile_dataset", {"path": csv}, "c1")]),
+        AIMessage("", tool_calls=[_tool_call(
             "propose_contract",
             {"expectations": [{"expectation_type": "expect_column_values_to_not_be_null", "kwargs": {"column": "order_id"}}], "table": "synthetic.orders"},
             "c2",
-        ),
-        _converse_tool_stream("request_approval", {}, "c3"),
+        )]),
+        AIMessage("", tool_calls=[_tool_call("request_approval", {}, "c3")]),
     ])
-    monkeypatch.setattr(bedrock_chat, "_invoke", lambda request, **kw: next(turns))
 
     graph = build_graph(
-        model=DeptBedrockChat(),
+        model=StreamingScriptedModel(messages=turns),
         registry=registry,
         contracts_dir=tmp_path,
         checkpointer=InMemorySaver(),
@@ -766,19 +758,25 @@ def test_a_reject_without_a_message_says_so(tmp_path, registry, synthetic_data_p
     assert result["messages"][-2].content == "owner did not approve; feedback: none given"
 
 
-def test_build_graph_defaults_to_the_bedrock_model_and_repo_registry(monkeypatch):
-    """No proxy call happens at build time, so the default graph compiles anywhere."""
+def test_build_graph_defaults_to_the_proxy_model_and_repo_registry(monkeypatch):
+    """No proxy call happens at build time, so the default graph compiles anywhere the
+    proxy's environment variables are set."""
+    pytest.importorskip("langchain_anthropic")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://proxy.invalid/anthropic")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "token")
     monkeypatch.setenv("DQ_AGENT_MODEL", "eu.anthropic.test-model")
     monkeypatch.setenv("DQ_AGENT_PROMPT_CACHE", "0")
+    from langchain_anthropic import ChatAnthropic
+
     built = {}
-    real = DeptBedrockChat.bind_tools
+    real = ChatAnthropic.bind_tools
 
     def spy(self, tools, **kwargs):
         built["model"] = self
         return real(self, tools, **kwargs)
 
-    monkeypatch.setattr(DeptBedrockChat, "bind_tools", spy)
+    monkeypatch.setattr(ChatAnthropic, "bind_tools", spy)
     graph = build_graph()
     assert set(graph.nodes) >= {"agent", "tools", "approval"}
-    assert built["model"].model_id == "eu.anthropic.test-model"
-    assert built["model"].cache_prompt is False
+    assert built["model"].model == "eu.anthropic.test-model"
+    assert "cache_control" not in built["model"].model_kwargs

@@ -9,7 +9,7 @@ token usage, and a download of the approved contract YAML.
 The graph and its SQLite connection are shared across sessions via `st.cache_resource`
 (`_resources`); only per-conversation state lives in `st.session_state`.
 
-Run from the repo root (needs the work environment for the Bedrock proxy to answer):
+Run from the repo root (needs the work environment for the bedrock-proxy to answer):
 
     uv run --extra ui streamlit run app/scoping_app.py
 """
@@ -35,8 +35,8 @@ from langchain_core.messages import (
 )
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from dq_agent.agents.bedrock_chat import BedrockProxyError
 from dq_agent.agents.gate import pending_interrupt, resume
+from dq_agent.agents.llm import ModelError
 from dq_agent.agents.scoping import DEFAULT_DATA_DIR, build_graph
 from dq_agent.connectors import DEFAULT_DSN_ENV, is_valid_table
 from dq_agent.models import Contract
@@ -200,9 +200,10 @@ def _render_transcript(result: dict[str, Any] | None, show_tools: bool) -> None:
             with st.chat_message("user"):
                 st.markdown(msg.content)
         elif isinstance(msg, AIMessage):
-            if msg.content:
+            # `.text`: the content is a list of blocks, thinking and tool use included
+            if msg.text:
                 with st.chat_message("assistant"):
-                    st.markdown(msg.content)
+                    st.markdown(msg.text)
             if show_tools and msg.tool_calls:
                 with st.chat_message("assistant"):
                     for call in msg.tool_calls:
@@ -228,12 +229,12 @@ def _agent_tokens(graph: Any, graph_input: Any) -> Any:
     """Yield assistant prose as the graph produces it, for `st.write_stream`. Tool-call
     chunks (partial JSON) are skipped; the transcript is re-rendered from state afterwards."""
     for chunk, _meta in graph.stream(graph_input, _config(), stream_mode="messages"):
-        if isinstance(chunk, AIMessageChunk) and isinstance(chunk.content, str) and chunk.content:
-            yield chunk.content
+        if isinstance(chunk, AIMessageChunk) and chunk.text:
+            yield chunk.text
 
 
 def _invoke(graph_input: Any) -> None:
-    """Advance the graph and store the result, or show a BedrockProxyError (also raised
+    """Advance the graph and store the result, or show a ModelError (also raised
     mid-stream) in the UI instead of a traceback, leaving the transcript for a retry.
     After streaming, state is reloaded from the checkpointer: a pending approval gate
     only appears in the persisted snapshot."""
@@ -247,7 +248,7 @@ def _invoke(graph_input: Any) -> None:
             )
         else:
             st.session_state.result = graph.invoke(graph_input, _config())
-    except BedrockProxyError as exc:
+    except ModelError as exc:
         st.error(f"The model call failed.\n\n{exc}")
         st.stop()
     st.rerun()
@@ -337,7 +338,7 @@ def _sidebar(result: dict[str, Any] | None) -> bool:
 
         inp, out = _token_usage(result)
         st.metric("Tokens (in / out)", f"{inp} / {out}")
-        st.caption("Summed from the Bedrock response usage.")
+        st.caption("Summed from the model's reported usage.")
 
 
         st.divider()

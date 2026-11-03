@@ -33,18 +33,19 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
-from dq_agent.agents.bedrock_chat import BedrockProxyError
 from dq_agent.agents.gate import decision_from_text, pending_interrupt, resume, saved_result
+from dq_agent.agents.llm import ModelError
 from dq_agent.agents.scoping import build_graph
 
 _QUIT = {"quit", "exit", ":q"}
 
 
 def _last_ai_text(result: dict[str, Any]) -> str:
-    """The latest assistant message text, skipping tool-call-only messages."""
+    """The latest assistant message text, skipping tool-call-only messages. `.text` keeps
+    only the text blocks: Claude's content is a list that also holds thinking and tool use."""
     for msg in reversed(result.get("messages", [])):
-        if isinstance(msg, AIMessage) and msg.content:
-            return msg.content if isinstance(msg.content, str) else str(msg.content)
+        if isinstance(msg, AIMessage) and msg.text:
+            return msg.text
     return ""
 
 
@@ -141,7 +142,7 @@ def main() -> None:
         graph = build_graph(checkpointer=checkpointer)
         try:
             converse(graph, thread_id)
-        except BedrockProxyError as exc:
+        except ModelError as exc:
             print(f"\n⚠️  The model call failed.\n\n{exc}")
             if args.db:
                 print(f"\nThe thread is saved — resume with "

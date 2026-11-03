@@ -6,19 +6,28 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("langgraph")
+pytest.importorskip("langchain_anthropic")
 pytest.importorskip("great_expectations")
 
+import anthropic
+import httpx2
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
-from dq_agent.agents.bedrock_chat import BedrockProxyError
 from dq_agent.agents.scoping import build_graph
 
 _SPEC = importlib.util.spec_from_file_location(
     "scoping_cli", Path(__file__).parent.parent / "scripts" / "scoping_cli.py")
 cli = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(cli)
+
+
+def _forbidden():
+    """What the SDK raises when the proxy answers 403 (e.g. the daily budget is spent)."""
+    request = httpx2.Request("POST", "http://proxy/anthropic/v1/messages")
+    return anthropic.PermissionDeniedError(
+        "Error code: 403 - daily budget spent", response=httpx2.Response(403, request=request), body=None)
 
 
 class ScriptedModel(GenericFakeChatModel):
@@ -117,7 +126,8 @@ def test_end_of_input_stops(monkeypatch):
 def test_last_ai_text_skips_tool_calls_and_reads_block_content():
     messages = [AIMessage("first"), _call("list_rules", {}, "c1")]
     assert cli._last_ai_text({"messages": messages}) == "first"
-    assert cli._last_ai_text({"messages": [AIMessage([{"type": "text", "text": "x"}])]}).startswith("[")
+    blocks = [{"type": "thinking", "thinking": "", "signature": "s"}, {"type": "text", "text": "x"}]
+    assert cli._last_ai_text({"messages": [AIMessage(blocks)]}) == "x"  # Claude's shape: text only
     assert cli._last_ai_text({"messages": []}) == ""
 
 
@@ -141,7 +151,7 @@ def test_memory_checkpointer_by_default():
 
 class _FailingGraph:
     def invoke(self, *args, **kwargs):
-        raise BedrockProxyError("bedrock-proxy call failed: 403", 403)
+        raise _forbidden()
 
     def get_state(self, config):
         class Snapshot:

@@ -5,9 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-uv sync                      # core deps (incl. the internal dwutils) + the dev group (pytest, ruff, mypy, ipykernel)
+uv sync                      # core deps + the dev group (pytest, ruff, mypy, ipykernel)
 uv sync --extra postgres     # add ConnectorX, psycopg, SQLAlchemy 1.4 for the Postgres connector
-uv sync --extra agents       # add LangGraph + LangChain + Great Expectations 0.18.2
+uv sync --extra agents       # add LangGraph + LangChain (+ langchain-anthropic) + Great Expectations 0.18.2
 uv sync --extra ui           # add Streamlit for app/scoping_app.py
 uv run python -m ipykernel install --user --name dq-agent --display-name "Python (dq-agent)"   # once
 
@@ -22,7 +22,7 @@ uv run python scripts/scoping_cli.py --db scoping.sqlite   # ...with a durable, 
 # notebooks/engine_gx_run.ipynb (dq-agent kernel): run a contract with GX 0.18.2 (file or Postgres)
 ```
 
-`pyproject.toml` and `uv.lock` are the work environment's: Python 3.13, the internal package mirrors, and `dwutils` as a core dependency. Outside work, `dwutils` and the first mirror return 403, so sync once with `uv sync --all-extras --no-install-package dwutils --index-strategy unsafe-best-match` and then run with `uv run --no-sync ...`. Do not edit the two files to make them install outside work; nothing in the tests imports `dwutils`.
+`pyproject.toml` and `uv.lock` are the work environment's: Python 3.13 and the internal package mirrors. Outside work the first mirror returns 403, so sync once with `uv sync --all-extras --index-strategy unsafe-best-match` and then run with `uv run --no-sync ...`. Do not edit the two files to make them install outside work, and lock at work: a lock made outside it with `unsafe-best-match` moves packages between mirrors.
 
 ## Architecture
 
@@ -94,11 +94,11 @@ Phases are strictly sequential: Phase 1 (registry + engine) and Phase 2 (profile
 
 This branch replaces the Polars engine with GX-native contracts and the data-flow kit; the engine survives on `feat/bedrock-proxy-adapter`. Like its parent, it targets an **air-gapped work environment** and diverges from `main` on two axes — do not "fix" these back toward `main`:
 
-- **Model.** The default chat model is `DeptBedrockChat` (`src/dq_agent/agents/bedrock_chat.py`), which reaches Anthropic-on-Bedrock through the internal `dwutils.bedrock` proxy. There is no Gemini / `init_chat_model` path and no `GOOGLE_API_KEY`. `dwutils` is internal (not on PyPI) and assumed importable at work; the import is deferred so unit tests run anywhere. `model` stays injectable in `build_graph` for tests.
+- **Model.** The default chat model is LangChain's `ChatAnthropic`, built by `src/dq_agent/agents/llm.py` and pointed at the department's bedrock-proxy, which serves the Anthropic Messages API at `ANTHROPIC_BASE_URL` (token in `ANTHROPIC_AUTH_TOKEN`). The default is Sonnet 5.5 (`eu.anthropic.claude-sonnet-5-5`); `DQ_AGENT_MODEL` overrides it. There is no Gemini / `init_chat_model` path and no `GOOGLE_API_KEY`. `dwutils.bedrock` was removed on purpose (2026-11): do not reinstate it, pin an old `dwutils`, or rebuild a Converse adapter. `model` stays injectable in `build_graph` for tests.
 - **Interface.** There is **no agent-chat-ui and no `langgraph dev` server** — the environment has no npm mirror. The interface is a **local, in-process driver** that compiles the graph itself and supplies its own checkpointer:
   - **CLI:** `scripts/scoping_cli.py` (the supported path today).
   - **Visual (for non-coders):** an optional Streamlit chat panel — same in-process graph + checkpointer pattern, npm-free.
 
-**Proxy behaviour lives in `BEDROCK_PROXY.md`.** The Converse wire format, the `simple=False` calling convention, prompt caching, streaming, per-model cache minimums and pricing, and the error shapes - all verified against the live proxy rather than taken from `dwutils` docstrings, which do not cover most of it. Read it before changing `bedrock_chat.py`, and re-check it after any proxy upgrade: these facts have changed under us once already.
+**Proxy behaviour lives in `BEDROCK_PROXY.md`.** Credentials, model ids, what is verified to work through `ChatAnthropic`, prompt caching and the error shapes, checked against the live proxy. Read it before changing `llm.py`, and re-check it after any proxy upgrade (`uv run pytest -m integration -v` at work): the proxy is a pilot and has changed under us twice already.
 
 **Checkpointer is mandatory for any driver.** The approval gate is a LangGraph `interrupt()`; without a checkpointer it cannot pause and resume, so the contract is never produced. On `main` the `langgraph dev` server supplied this implicitly — here each driver must pass one to `build_graph(checkpointer=...)` (`MemorySaver` for an ephemeral session, `SqliteSaver` for a resumable one). A driver loop must also distinguish a normal conversational turn (send a new message) from a pending interrupt (send `Command(resume=...)`) by checking `result.get("__interrupt__")`.

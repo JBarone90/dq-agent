@@ -24,7 +24,7 @@ data-flow kit (dataflow_kit/, copied into data-flow) — run time, every pipelin
 
 - **Shared rules, two copies.** `dataflow_kit/operators/dq_validation.py` and `src/dq_agent/gx_contract.py` hold the same allowlist (16 expectations), forbidden kwargs, policy and severity rules. Neither imports the other; `tests_kit/test_kit_parity.py` fails if they disagree (run in this checkout; the work repo has no kit).
 - **Single scoping agent.** One LangGraph agent with tools (`profile_dataset`, `profile_table`, `list_rules`, `propose_contract`, `request_approval`, plus the two creative-mode tools); the approval gate is an `interrupt()`. Sub-agents were planned and not needed.
-- **Drivers.** A terminal CLI and a Streamlit app, both in-process with their own checkpointer, both through `agents/gate.py`. The model is `DeptBedrockChat` over the internal Bedrock proxy.
+- **Drivers.** A terminal CLI and a Streamlit app, both in-process with their own checkpointer, both through `agents/gate.py`. The model is `ChatAnthropic` (Sonnet 5.5) over the department's bedrock-proxy, which serves the Anthropic Messages API.
 
 ## Current state and next steps (2026-10-16)
 
@@ -302,6 +302,8 @@ Open items for the data-flow pilot:
 **Severity and the extended allowlist (2026-10-15/16).** Per-rule severity is back, in GX form: each expectation's `meta.severity` is `error` (fails the task) or `warning` (logged and recorded, the run completes); missing means `error`, and a check that could not run is always an `error`. The owner chooses it at the approval gate. The allowlist grew to 16 Postgres-safe expectations (max-between, not-in-set, not-match-regex, value lengths, column pair A > B, compound unique, unique within record, columns match set), with policy rules for their multi-column kwargs. dq-agent stopped importing the kit: `src/dq_agent/gx_contract.py` carries the same rules for the agent, and `tests/test_gx_contract.py` holds the two to the same allowlist and the same verdict on every contract it tries, so both change together.
 
 **Removed at work (2026-10-16).** The evaluation harness (`harness.py` and its live-LLM integration tests) and `scripts/explore_bedrock.py` were deleted; `BEDROCK_PROXY.md` keeps what the probe established. The notebook is now `engine_gx_run.ipynb` and runs on `gx_contract`. The project moved to Python 3.13 with the work package mirrors, and `dwutils` became a core dependency.
+
+**`dwutils.bedrock` removed (2026-11-03).** The department removed the module on purpose and moved the proxy to the Anthropic Messages API. `DeptBedrockChat` and its Converse translation were deleted; the default model is now `langchain-anthropic`'s `ChatAnthropic` pointed at `ANTHROPIC_BASE_URL` (`agents/llm.py`), defaulting to Sonnet 5.5, and `dwutils` is no longer a dependency. LangGraph, the gate and the tools are unchanged; Pydantic AI was considered and rejected, because it would replace LangGraph and the gate depends on `interrupt()` and the checkpointer.
 ---
 
 ## Tech Stack (Initial)
@@ -312,7 +314,7 @@ Open items for the data-flow pilot:
 | Package manager      | uv                 | Fast, reproducible                                                                   |
 | Orchestration        | LangGraph          | Native support for multi-agent + human-in-the-loop                                   |
 | LLM binding          | LangChain core     | Provider-agnostic interface                                                          |
-| Dev/demo LLM         | Bedrock proxy (`DeptBedrockChat`) | Air-gapped default on this branch: Anthropic-on-Bedrock via the internal `dwutils.bedrock` proxy; `DQ_AGENT_MODEL` picks the Bedrock model id (`main` uses Gemini free tier) |
+| Dev/demo LLM         | bedrock-proxy (`ChatAnthropic`) | Air-gapped default on this branch: Claude through the department's proxy, which serves the Anthropic Messages API; `DQ_AGENT_MODEL` picks the model id (`main` uses Gemini free tier) |
 | Data layer           | Polars             | Fast, memory-efficient, clean API; consistent interface across CSV and DB connectors |
 | DB connector         | ConnectorX or ADBC | Polars-native Postgres ingestion                                                     |
 | Rule/contract format | YAML (GX 0.18.2-native) | Human-readable, diffable, versionable; runs unchanged in data-flow              |

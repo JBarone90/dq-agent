@@ -517,16 +517,15 @@ def build_graph(
     defaults serve the localhost demo (model from $DQ_AGENT_MODEL, repo-root
     registry, contracts, proposals and data directories)."""
     if model is None:
-        # The work environment is air-gapped and reaches Bedrock only through the
-        # internal bedrock-proxy, so the default model is DeptBedrockChat rather than
-        # init_chat_model. Inject `model` to run elsewhere (the tests do).
-        from dq_agent.agents.bedrock_chat import DEFAULT_MODEL_ID, DeptBedrockChat
+        # The work environment is air-gapped and reaches Claude only through the
+        # internal bedrock-proxy. Inject `model` to run elsewhere (the tests do).
+        from dq_agent.agents.llm import DEFAULT_MODEL_ID, default_model
 
-        model = DeptBedrockChat(
-            model_id=os.environ.get("DQ_AGENT_MODEL", DEFAULT_MODEL_ID),
+        model = default_model(
+            os.environ.get("DQ_AGENT_MODEL", DEFAULT_MODEL_ID),
             # Prompt caching is on by default; DQ_AGENT_PROMPT_CACHE=0 turns it
-            # off, which is the escape hatch if the proxy ever rejects the
-            # cachePoint blocks.
+            # off, which is the escape hatch if the proxy ever rejects
+            # `cache_control`.
             cache_prompt=os.environ.get("DQ_AGENT_PROMPT_CACHE", "1") != "0",
         )
     if registry is None:

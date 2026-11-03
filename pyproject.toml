@@ -9,7 +9,6 @@ description = "Conversational data quality framework with a curated rule registr
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "dwutils>=0.7.6",
     "orjson>=3.10",
     "polars>=1.0.0",
     "pydantic>=2.0.0",
@@ -27,8 +26,10 @@ postgres = [
     "pyarrow>=15.0.0",  # connectorx hands results to polars as Arrow tables
 ]
 agents = [
+    "anthropic>=2.4.0",
     "great-expectations==0.18.2",  # the version data-flow runs
     "langchain>=0.3.0",                
+    "langchain-anthropic>=1.7.9",
     "langchain-core>=0.3.0",
     "langgraph>=0.2.0",
     "langgraph-checkpoint-sqlite>=2.0.0",
@@ -59,8 +60,8 @@ markers = [
 files = ["src"]
 
 [[tool.mypy.overrides]]
-# no type information: GX 0.18.2, the internal dwutils, and psycopg2 (only a DSN-parsing fallback)
-module = ["great_expectations.*", "dwutils.*", "psycopg2.*"]
+# no type information: GX 0.18.2 and psycopg2 (only a DSN-parsing fallback)
+module = ["great_expectations.*", "psycopg2.*"]
 ignore_missing_imports = true
 
 [[tool.uv.index]]
